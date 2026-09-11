@@ -46,5 +46,5 @@ export function openRouterFallbackModel(): string | undefined {
 }
 
 export function openRouterAppUrl(): string {
-  return env('OPENROUTER_SITE_URL') ?? 'https://bubu-tracker.netlify.app'
+  return env('OPENROUTER_SITE_URL') ?? 'https://bubu-cafe.netlify.app'
 }

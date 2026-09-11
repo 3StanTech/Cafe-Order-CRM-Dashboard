@@ -12,7 +12,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { isPinnedFreeModelId } from '../server/openrouter'
+import { isPinnedFreeModelId, openRouterAppUrl } from '../server/openrouter'
 import {
   extractionInstruction,
   OPENROUTER_TIMEOUT_MS,
@@ -249,7 +249,7 @@ export async function runConversation(apiKey: string, model: string, fixture: Be
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${apiKey}`,
-        'HTTP-Referer': 'https://bubu-tracker.netlify.app',
+        'HTTP-Referer': openRouterAppUrl(),
         'X-Title': 'Gelly Dashboard benchmark',
       },
       body: JSON.stringify({
