@@ -136,10 +136,6 @@ function isProductFlavor(value: unknown): value is ProductFlavor {
   return value === 'plain' || value === 'strawberry' || value === 'salted_maple'
 }
 
-function isPowder(value: unknown): value is Powder {
-  return value === 'yumeno' || value === 'mk_isuzu'
-}
-
 function isSweetness(value: unknown): value is Sweetness {
   return value === 'none' || value === 'light' || value === 'regular' || value === 'extra'
 }

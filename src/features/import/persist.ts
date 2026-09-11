@@ -4,6 +4,7 @@ import type {
   StorageAdapter,
   StoredOrder,
 } from '../../data/types'
+import { MAX_CUPS_PER_ORDER } from '../../domain/pricing'
 import { ensureCatalogProducts } from '../../data/ensure-catalog-products'
 import { priceDraftItems } from './priceDraftItems'
 import { validateDraft } from './parser'
@@ -31,6 +32,44 @@ export function ensureConfirmationKey(draft: ImportDraft): string {
   return draft.confirmationKey && /^[A-Za-z0-9._:-]{16,100}$/.test(draft.confirmationKey)
     ? draft.confirmationKey
     : confirmationKey()
+}
+
+/** Logical draft identity intentionally excludes runtime catalog prices. */
+export function importDraftIdentity(draft: ImportDraft): string {
+  return JSON.stringify({
+    rawSource: draft.rawSource,
+    customerName: draft.customerName,
+    customerPhone: draft.customerPhone ?? null,
+    matchedCustomerId: draft.matchedCustomerId,
+    items: draft.items.map(({ productSlug, quantity, level, powder, sweetness, cupNames }) => ({ productSlug, quantity, level, powder, sweetness: sweetness ?? null, cupNames: cupNames ?? [] })),
+    thermalBags: draft.thermalBags.map(({ coveredCupCount }) => ({ coveredCupCount })),
+    deliveryDate: draft.deliveryDate,
+    address: draft.address,
+    notes: draft.notes,
+  })
+}
+
+function structuralConfirmationErrors(draft: ImportDraft): string[] {
+  const errors = [...draft.unresolvedFields]
+  if (!draft.customerName) errors.push('Customer name is required')
+  let cups = 0
+  draft.items.forEach((item, index) => {
+    if (!item.productSlug) errors.push(`Item ${index + 1}: a drink is required`)
+    if (!Number.isSafeInteger(item.quantity) || (item.quantity ?? 0) < 1) errors.push(`Item ${index + 1}: quantity must be a positive integer`)
+    else cups += item.quantity!
+    if (item.quantity !== null && item.quantity !== undefined && item.quantity > MAX_CUPS_PER_ORDER) errors.push(`Item ${index + 1}: quantity cannot exceed ${MAX_CUPS_PER_ORDER} cups`)
+    if (!item.level) errors.push(`Item ${index + 1}: level is required`)
+    if (!item.powder) errors.push(`Item ${index + 1}: powder is required`)
+    if (item.cupNames && item.quantity !== null && item.cupNames.length > item.quantity) errors.push(`Item ${index + 1}: cup names exceed quantity`)
+  })
+  if (cups > MAX_CUPS_PER_ORDER) errors.push(`An order cannot exceed ${MAX_CUPS_PER_ORDER} cups in total`)
+  let covered = 0
+  draft.thermalBags.forEach((bag, index) => {
+    if (!bag.coveredCupCount || ![1, 2, 3, 4].includes(bag.coveredCupCount)) errors.push(`Thermal bag ${index + 1}: coverage is required`)
+    else covered += bag.coveredCupCount
+  })
+  if (covered > cups) errors.push('Thermal bags cannot cover more cups than the order contains')
+  return [...new Set(errors)]
 }
 
 function canonicalConfirmationInput(input: OrderConfirmationInput): string {
@@ -78,6 +117,22 @@ function invalidDraftMessage(draft: ImportDraft): string {
  * runtime catalog. It performs no customer or order writes.
  */
 export async function prepareImportConfirmation(adapter: StorageAdapter, draft: ImportDraft): Promise<PreparedImportConfirmation> {
+  if (draft.confirmationSnapshot) {
+    if (draft.confirmationSnapshot.draftIdentity !== importDraftIdentity(draft)) {
+      throw new Error('This draft changed after a confirmation attempt. Restore the original fields before retrying so the durable key can resolve the earlier attempt.')
+    }
+    const structuralErrors = structuralConfirmationErrors(draft)
+    if (structuralErrors.length > 0) throw new Error(`Cannot confirm an invalid draft: ${structuralErrors.join('; ')}`)
+    return {
+      draft: {
+        ...draft,
+        confirmationKey: draft.confirmationSnapshot.input.confirmationKey,
+        confirmationRequestHash: draft.confirmationSnapshot.input.requestHash,
+      },
+      input: draft.confirmationSnapshot.input,
+    }
+  }
+
   const validation = validateDraft(draft)
   if (validation.errors.length > 0 || validation.totalCentavos === null || !draft.customerName) throw new Error(invalidDraftMessage(draft))
 
@@ -141,6 +196,10 @@ export async function prepareImportConfirmation(adapter: StorageAdapter, draft: 
     confirmationKey: input.confirmationKey,
     confirmationRequestHash: input.requestHash,
     confirmationAttemptedAt: Date.now(),
+    confirmationSnapshot: {
+      draftIdentity: importDraftIdentity(draft),
+      input,
+    },
   }
   return { draft: preparedDraft, input }
 }

@@ -1,9 +1,7 @@
 import {
   HOJICHA_LEVEL_UPCHARGES,
   MATCHA_LEVEL_UPCHARGES,
-  POWDER_UPCHARGES,
   PRODUCT_CATALOG,
-  THERMAL_BAG_PRICES,
 } from '../../domain/catalog'
 import { priceOrder, type PricingCatalogSnapshot } from '../../domain/pricing'
 import type { PricedOrder, ProductSlug } from '../../domain/contracts'

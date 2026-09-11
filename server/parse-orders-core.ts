@@ -93,7 +93,7 @@ export function validateStructuralResponse(value: unknown): value is { orders: R
   })
 }
 
-function textFromChoice(payload: unknown): { text: string; finishReason?: string } | null {
+export function textFromChoice(payload: unknown): { text: string; finishReason?: string } | null {
   if (!isRecord(payload) || payload.error != null || !Array.isArray(payload.choices) || payload.choices.length !== 1) return null
   const choice = payload.choices[0]
   if (!isRecord(choice) || !isRecord(choice.message)) return null
@@ -107,7 +107,7 @@ function textFromChoice(payload: unknown): { text: string; finishReason?: string
   return text.trim() ? { text: text.trim(), finishReason: typeof choice.finish_reason === 'string' ? choice.finish_reason : undefined } : null
 }
 
-function parseProviderJson(text: string): unknown {
+export function parseProviderJson(text: string): unknown {
   const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
   return JSON.parse(cleaned)
 }

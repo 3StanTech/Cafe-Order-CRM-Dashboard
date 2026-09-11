@@ -8,6 +8,7 @@ import { useOrderActions } from '../orders/useOrderActions'
 import { useOrdersData } from '../orders/useOrdersData'
 import { OrderEditorModal } from '../order-editor/OrderEditorModal'
 import { blankImportDraft, storedOrderToImportDraft } from '../order-editor/orderDraftMapping'
+import { usePendingSubmissionCount } from '../import/pending-api'
 import { relevantDeliveryDate } from './delivery-dates'
 
 function routeSort(left: StoredOrder, right: StoredOrder): number {
@@ -30,6 +31,7 @@ export function TodayBoard({ adapter: providedAdapter, initialDeliveryDate }: To
   const [view, setView] = useState<'board' | 'run'>('board')
   const [editorState, setEditorState] = useState<EditorState | null>(null)
   const { busyOrderId, setBusyOrderId, advance, cancel, deleteOrder } = useOrderActions(adapter)
+  const pendingCount = usePendingSubmissionCount()
 
   const selectedOrders = useMemo(
     () => orders.filter((order) => order.deliveryDate === deliveryDate),
@@ -69,6 +71,16 @@ export function TodayBoard({ adapter: providedAdapter, initialDeliveryDate }: To
           <input aria-label="Delivery date" type="date" value={deliveryDate} onChange={(event) => setDeliveryDate(event.target.value)} className="rounded-xl border border-[#4F74C8]/30 bg-white px-3 py-2 text-[#20242F] transition-colors focus:border-[#4F74C8]" />
         </label>
       </header>
+
+      {pendingCount !== null && pendingCount > 0 && (
+        <a
+          href="/import"
+          className="mt-4 flex min-h-11 items-center justify-between gap-3 rounded-xl border border-[#4F74C8]/30 bg-[#EAF0FF] px-4 text-sm font-bold text-[#365AA9] transition-colors hover:bg-[#4F74C8]/10"
+        >
+          <span>{pendingCount} pending {pendingCount === 1 ? 'submission' : 'submissions'} to review</span>
+          <span>Open Import</span>
+        </a>
+      )}
 
       <button
         type="button"

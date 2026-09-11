@@ -5,7 +5,7 @@
  * two hosts cannot drift. Tokens are never logged.
  */
 
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { DASHBOARD_AUTH_EMAIL } from './dashboard-auth-email'
 
 export { DASHBOARD_AUTH_EMAIL }
@@ -30,6 +30,27 @@ export function supabaseServerConfig(): { url: string; anonKey: string } | null 
   const anonKey = env('VITE_SUPABASE_ANON_KEY')
   if (!url || !anonKey) return null
   return { url, anonKey }
+}
+
+/**
+ * Authenticated owner client. PostgREST receives the user JWT so auth.uid()
+ * matches dashboard_owner_uid() on accept/reject RPCs. Fails closed without
+ * anon config or an access token. Never uses the service-role key.
+ */
+export function createOwnerUserClient(token: string): SupabaseClient | null {
+  const config = supabaseServerConfig()
+  const accessToken = token.trim()
+  if (!config || !accessToken) return null
+  return createClient(config.url, config.anonKey, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        apikey: config.anonKey,
+      },
+    },
+    accessToken: async () => accessToken,
+  })
 }
 
 function headerValue(

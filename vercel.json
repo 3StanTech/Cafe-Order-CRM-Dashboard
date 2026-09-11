@@ -5,6 +5,7 @@
   "outputDirectory": "dist",
   "rewrites": [
     { "source": "/.netlify/functions/parse-orders", "destination": "/api/parse-orders" },
+    { "source": "/.netlify/functions/order-submissions", "destination": "/api/order-submissions" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
   "headers": [

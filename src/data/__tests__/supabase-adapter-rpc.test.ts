@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createFakePostgrest, fakeCreateClient, type Row } from './fake-postgrest'
-import type { StoredCustomer, StoredOrder, StoredOrderItem, StoredProduct } from '../types'
+import type { OrderConfirmationInput, StoredCustomer, StoredOrder, StoredOrderItem, StoredProduct } from '../types'
 
 const fake = createFakePostgrest()
 
@@ -118,5 +118,85 @@ describe('SupabaseAdapter aggregate RPCs', () => {
     expect(updated.items[0].id).toBe(replacement.id)
     expect(fake.rpcCalls.filter((call) => call.name === 'replace_order_items')).toHaveLength(1)
     expect(fake.inserts.slice(insertsBefore).some((row) => row.id === replacement.id || row.order_id === ORDER_ID)).toBe(false)
+  })
+
+  const confirmationInput: OrderConfirmationInput = {
+    order,
+    customer: { id: null, name: 'Imported Customer', phone: '09170000999' },
+    confirmationKey: 'durable-confirm-01',
+    requestHash: 'ab'.repeat(32),
+  }
+
+  it('maps create_order_with_confirmation RPC errors to a safe message without interpolating result.message', async () => {
+    const leaked = 'duplicate key value violates unique constraint for victim@example.com 0917SECRET'
+    fake.rpcHandlers.create_order_with_confirmation = () => ({
+      data: null,
+      error: { message: leaked, code: '23505' },
+    })
+    const adapter = await SupabaseAdapter.create('https://example.supabase.co', 'anon-key')
+    const insertsBefore = fake.inserts.length
+    const error = await adapter.confirmOrderWithResolution(confirmationInput).then(
+      () => { throw new Error('expected confirmation RPC to fail') },
+      (reason: unknown) => reason as Error,
+    )
+    expect(error.message).toBe('Durable order confirmation failed. Review the customer and order details, then try again.')
+    expect(error.message).not.toMatch(/victim@example.com|0917SECRET|duplicate key/)
+    expect(fake.inserts).toHaveLength(insertsBefore)
+    expect(fake.tables.customers ?? []).toHaveLength(0)
+    expect(fake.rpcCalls.some((call) => call.name === 'create_order_with_items')).toBe(false)
+  })
+
+  it('keeps the missing-RPC confirmation message and does not create a customer first', async () => {
+    const adapter = await SupabaseAdapter.create('https://example.supabase.co', 'anon-key')
+    await expect(adapter.confirmOrderWithResolution(confirmationInput)).rejects.toThrow(
+      'Durable order confirmation is not available. Apply the pending confirmation migration before importing Viber orders.',
+    )
+    expect(fake.tables.customers ?? []).toHaveLength(0)
+    expect(fake.inserts).toHaveLength(0)
+  })
+
+  it('maps create_order_with_items RPC errors to a safe message without interpolating result.message', async () => {
+    fake.rpcHandlers.create_order_with_items = () => ({
+      data: null,
+      error: { message: 'new row for relation orders violates check for victim@example.com', code: '23514' },
+    })
+    const adapter = await SupabaseAdapter.create('https://example.supabase.co', 'anon-key')
+    const error = await adapter.createOrder(order).then(
+      () => { throw new Error('expected create_order_with_items to fail') },
+      (reason: unknown) => reason as Error,
+    )
+    expect(error.message).toBe('Supabase create_order_with_items failed.')
+    expect(error.message).not.toMatch(/victim@example.com/)
+  })
+
+  it('maps replace_order_items RPC errors to a safe message without interpolating result.message', async () => {
+    fake.rpcHandlers.replace_order_items = () => ({
+      data: null,
+      error: { message: 'update order_items failed for victim@example.com', code: 'PGRST116' },
+    })
+    const adapter = await SupabaseAdapter.create('https://example.supabase.co', 'anon-key')
+    await adapter.createCustomer(customer)
+    await adapter.createProduct(product)
+    await adapter.createOrder(order)
+    const error = await adapter.updateOrder(ORDER_ID, { items: [item] }).then(
+      () => { throw new Error('expected replace_order_items to fail') },
+      (reason: unknown) => reason as Error,
+    )
+    expect(error.message).toBe('Supabase replace_order_items failed.')
+    expect(error.message).not.toMatch(/victim@example.com/)
+  })
+
+  it('maps delete_customer_cascade RPC errors to a safe message without interpolating result.message', async () => {
+    fake.rpcHandlers.delete_customer_cascade = () => ({
+      data: null,
+      error: { message: 'delete failed for customer victim@example.com', code: '42501' },
+    })
+    const adapter = await SupabaseAdapter.create('https://example.supabase.co', 'anon-key')
+    const error = await adapter.deleteCustomerCascade!(CUSTOMER_ID).then(
+      () => { throw new Error('expected delete_customer_cascade to fail') },
+      (reason: unknown) => reason as Error,
+    )
+    expect(error.message).toBe('Supabase delete_customer_cascade failed.')
+    expect(error.message).not.toMatch(/victim@example.com/)
   })
 })

@@ -20,15 +20,17 @@ let OrdersPage: ComponentType
 let CustomersPage: ComponentType
 let InsightsPage: ComponentType
 let SettingsPage: ComponentType
+let PublicOrderPage: ComponentType
 
 if (import.meta.env.MODE === 'test') {
-  const [today, imp, orders, customers, insights, settings] = await Promise.all([
+  const [today, imp, orders, customers, insights, settings, publicOrder] = await Promise.all([
     import('./pages/TodayPage'),
     import('./pages/ImportPage'),
     import('./pages/OrdersPage'),
     import('./pages/CustomersPage'),
     import('./pages/InsightsPage'),
     import('./pages/SettingsPage'),
+    import('./pages/PublicOrderPage'),
   ])
   TodayPage = today.TodayPage
   ImportPage = imp.ImportPage
@@ -36,6 +38,7 @@ if (import.meta.env.MODE === 'test') {
   CustomersPage = customers.CustomersPage
   InsightsPage = insights.InsightsPage
   SettingsPage = settings.SettingsPage
+  PublicOrderPage = publicOrder.PublicOrderPage
 } else {
   TodayPage = lazy(() =>
     import('./pages/TodayPage').then((m) => ({ default: m.TodayPage })),
@@ -54,6 +57,9 @@ if (import.meta.env.MODE === 'test') {
   )
   SettingsPage = lazy(() =>
     import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })),
+  )
+  PublicOrderPage = lazy(() =>
+    import('./pages/PublicOrderPage').then((m) => ({ default: m.PublicOrderPage })),
   )
 }
 
@@ -78,33 +84,49 @@ function SuspenseOutlet() {
   )
 }
 
-export default function App() {
+function PrivateLayout() {
   return (
     <AuthBoundary>
       <StorageProvider>
         <ErrorBoundary>
           {isDemoMode && <DemoBanner />}
           <div className={isDemoMode ? 'pt-9' : undefined}>
-            <BrowserRouter>
-              <Routes>
-                <Route element={<AppShell />}>
-                  <Route element={<SuspenseOutlet />}>
-                    <Route path="/today" element={<TodayPage />} />
-                    <Route path="/import" element={<ImportPage />} />
-                    <Route path="/orders" element={<OrdersPage />} />
-                    <Route path="/customers" element={<CustomersPage />} />
-                    <Route path="/insights" element={<InsightsPage />} />
-                    <Route path="/settings" element={<SettingsPage />} />
-                    <Route path="/" element={<Navigate to="/today" replace />} />
-                    <Route path="*" element={<Navigate to="/today" replace />} />
-                  </Route>
-                </Route>
-              </Routes>
-            </BrowserRouter>
+            <Outlet />
           </div>
           <InstallPrompt />
         </ErrorBoundary>
       </StorageProvider>
     </AuthBoundary>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route
+          path="/order"
+          element={
+            <Suspense fallback={<RouteFallback />}>
+              <PublicOrderPage />
+            </Suspense>
+          }
+        />
+        <Route element={<PrivateLayout />}>
+          <Route element={<AppShell />}>
+            <Route element={<SuspenseOutlet />}>
+              <Route path="/today" element={<TodayPage />} />
+              <Route path="/import" element={<ImportPage />} />
+              <Route path="/orders" element={<OrdersPage />} />
+              <Route path="/customers" element={<CustomersPage />} />
+              <Route path="/insights" element={<InsightsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/" element={<Navigate to="/today" replace />} />
+              <Route path="*" element={<Navigate to="/today" replace />} />
+            </Route>
+          </Route>
+        </Route>
+      </Routes>
+    </BrowserRouter>
   )
 }

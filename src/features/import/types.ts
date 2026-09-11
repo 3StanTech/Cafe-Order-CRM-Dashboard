@@ -1,4 +1,5 @@
 import type { DrinkLevel, Powder, ProductSlug, Sweetness } from '../../domain/contracts'
+import type { OrderConfirmationInput } from '../../data/types'
 
 export type ImportItem = {
   id: string
@@ -35,6 +36,11 @@ export type ImportDraft = {
   /** Hash of the last attempted logical payload for the stable key. */
   confirmationRequestHash?: string
   confirmationAttemptedAt?: number
+  /** Immutable first-attempt payload used for an uncertain retry. */
+  confirmationSnapshot?: {
+    draftIdentity: string
+    input: OrderConfirmationInput
+  }
 }
 
 export type StructuralItem = {

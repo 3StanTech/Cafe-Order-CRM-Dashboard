@@ -86,13 +86,13 @@ export class SupabaseAdapter implements StorageAdapter {
   }
 
   private async rpc<T>(name: string, args: Record<string, unknown>): Promise<
-    { ok: true; data: T } | { ok: false; missing: true } | { ok: false; missing: false; message: string }
+    { ok: true; data: T } | { ok: false; missing: true } | { ok: false; missing: false }
   > {
     await this.authenticated()
     const { data, error } = await this.client.rpc(name, args)
     if (!error) return { ok: true, data: data as T }
     if (isMissingRpc(error)) return { ok: false, missing: true }
-    return { ok: false, missing: false, message: error.message }
+    return { ok: false, missing: false }
   }
 
   async listProducts(): Promise<StoredProduct[]> { return (await this.rows('products')).map(fromProduct) }
@@ -116,7 +116,7 @@ export class SupabaseAdapter implements StorageAdapter {
   async deleteCustomerCascade(customerId: string): Promise<void> {
     const result = await this.rpc<null>('delete_customer_cascade', { p_customer_id: customerId })
     if (result.ok) return
-    if (!result.missing) throw new Error(`Supabase delete_customer_cascade failed: ${result.message}`)
+    if (!result.missing) throw new Error('Supabase delete_customer_cascade failed.')
     const orders = await this.listOrders()
     for (const order of orders.filter((order) => order.customerId === customerId)) await this.deleteOrder(order.id)
     const profile = await this.getSetting(`customer:${customerId}:profile`)
@@ -157,7 +157,7 @@ export class SupabaseAdapter implements StorageAdapter {
   async createOrder(order: StoredOrder): Promise<StoredOrder> {
     const result = await this.rpc<Row>('create_order_with_items', { p_order: toOrder(order), p_items: order.items.map(toItem) })
     if (result.ok) return fromOrder(asRow(result.data), await this.listOrderItems(order.id))
-    if (!result.missing) throw new Error(`Supabase create_order_with_items failed: ${result.message}`)
+    if (!result.missing) throw new Error('Supabase create_order_with_items failed.')
     const created = fromOrder(await this.insert('orders', toOrder(order)))
     const items = await Promise.all(order.items.map((item) => this.createOrderItem(item)))
     return { ...created, items }
@@ -196,7 +196,7 @@ export class SupabaseAdapter implements StorageAdapter {
       const next = { ...current, ...patch }
       const result = await this.rpc<Row>('replace_order_items', { p_order_id: id, p_order: toOrder(next), p_items: patch.items.map(toItem) })
       if (result.ok) return fromOrder(asRow(result.data), await this.listOrderItems(id))
-      if (!result.missing) throw new Error(`Supabase replace_order_items failed: ${result.message}`)
+      if (!result.missing) throw new Error('Supabase replace_order_items failed.')
       const updated = fromOrder(await this.replace('orders', id, toOrder(next)))
       for (const item of current.items) await this.deleteOrderItem(item.id)
       for (const item of patch.items) await this.createOrderItem(item)

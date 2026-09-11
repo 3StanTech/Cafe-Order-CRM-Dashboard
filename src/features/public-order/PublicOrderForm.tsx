@@ -4,21 +4,29 @@ import type { DrinkFamily, Powder, ProductSlug, Sweetness } from '../../domain/c
 import { formatPesos } from '../../domain/money'
 import { MAX_CUPS_PER_ORDER } from '../../domain/pricing'
 import {
+  getPublicOrderMenu,
   getReconfirmation,
+  PublicOrderApiError,
   publicOrderErrorMessage,
   submitPublicOrder,
   type PublicOrderDelivery,
   type PublicOrderFetch,
+  type PublicOrderInput,
   type PublicOrderMenu,
   type PublicOrderProduct,
   type PublicOrderReceipt,
   type PublicOrderReconfirmation,
 } from './api'
+import {
+  clearPublicOrderAttempt,
+  readPublicOrderAttempt,
+  savePublicOrderAttempt,
+} from './attempt-recovery'
 import { pricePublicOrder, type PublicOrderDraft } from './quote'
 import {
   clearRememberedPublicOrderDetails,
+  readRememberedPublicOrderDetails,
   saveRememberedPublicOrderDetails,
-  type RememberedPublicOrderDetails,
 } from './storage'
 
 type OrderLine = {
@@ -38,12 +46,14 @@ type ThermalBagLine = {
 
 type ReconfirmState = PublicOrderReconfirmation & { confirmed: boolean }
 
+type ReceiptLine = OrderLine & { productName: string }
+
 type LocalReceipt = {
   response: PublicOrderReceipt
   customerName: string
   customerPhone: string
   address: string
-  lines: OrderLine[]
+  lines: ReceiptLine[]
   thermalBags: ThermalBagLine[]
   paymentAccount: string
   delivery: PublicOrderDelivery
@@ -54,7 +64,7 @@ type PublicOrderFormProps = {
   endpoint: string
   fetcher: PublicOrderFetch
   storage: Storage | null
-  onMenuRevisionChange: (patch: Pick<PublicOrderMenu, 'delivery' | 'quoteRevision'>) => void
+  onMenuRevisionChange: (menu: PublicOrderMenu) => void
 }
 
 type FieldErrors = Partial<Record<'customerName' | 'customerPhone' | 'address', string>>
@@ -142,11 +152,15 @@ function fieldErrorFor(name: keyof FieldErrors, values: { customerName: string; 
   return undefined
 }
 
+function productNameFor(menu: PublicOrderMenu, slug: ProductSlug): string {
+  return menu.products.find((product) => product.slug === slug)?.name ?? slug
+}
+
 function buildViberMessage(receipt: LocalReceipt): string {
   const lines = receipt.lines.map((line) => {
     const names = line.cupNames.map((name) => name.trim()).filter(Boolean)
     const nameText = names.length ? ` (${names.join(', ')})` : ''
-    return `${line.quantity}× ${line.productSlug} · L${line.level}${nameText}`
+    return `${line.quantity}× ${line.productName} · L${line.level}${nameText}`
   }).join('\n')
   return [
     `Order ${receipt.response.reference}`,
@@ -155,8 +169,46 @@ function buildViberMessage(receipt: LocalReceipt): string {
     `Delivery: ${formatLongDate(receipt.response.deliveryDate)} · ${formatWindow(receipt.delivery)}`,
     lines,
     `Total: ${formatPesos(receipt.response.totalCentavos)}`,
-    'I will send my GCash screenshot in Viber. Payment is pending Angela\'s acceptance.',
+    'I will send my GCash screenshot in Viber. Payment is not verified here.',
   ].join('\n')
+}
+
+const UNCERTAIN_RETRY_MESSAGE = 'We could not confirm this order was received. Retry the same submission without changing your order.'
+const RESTORED_UNCERTAIN_MESSAGE = 'Your previous submission may have succeeded. Retry the same order without changing it — do not edit it into a new order.'
+
+function isUncertainTransport(error: unknown): boolean {
+  if (error instanceof PublicOrderApiError) return error.status >= 500
+  if (error instanceof DOMException && error.name === 'AbortError') return true
+  return error instanceof Error
+}
+
+function isKeyMismatch(error: unknown): boolean {
+  return error instanceof PublicOrderApiError && error.status === 409 && getReconfirmation(error) === null
+}
+
+function persistAttempt(payload: PublicOrderInput, uncertain: boolean): void {
+  savePublicOrderAttempt({
+    idempotencyKey: payload.idempotencyKey,
+    payload,
+    uncertain,
+    savedAt: Date.now(),
+  })
+}
+
+function linesFromPayload(items: PublicOrderInput['items']): OrderLine[] {
+  return items.map((item) => ({
+    id: localId('drink'),
+    productSlug: item.productSlug,
+    quantity: item.quantity,
+    level: item.modifiers.level,
+    powder: item.modifiers.powder,
+    ...(item.modifiers.sweetness ? { sweetness: item.modifiers.sweetness } : {}),
+    cupNames: Array.from({ length: item.quantity }, (_, index) => item.cupNames?.[index] ?? ''),
+  }))
+}
+
+function bagsFromPayload(bags: PublicOrderInput['thermalBags']): ThermalBagLine[] {
+  return bags.map((bag) => ({ id: localId('bag'), coveredCupCount: bag.coveredCupCount }))
 }
 
 function levelLabel(family: DrinkFamily, level: 1 | 2 | 3): string {
@@ -199,7 +251,7 @@ function PublicOrderReceiptView({ receipt, onStartAnother }: { receipt: LocalRec
         <dl className="mt-3 divide-y divide-[#4F74C8]/20 text-sm">
           <div className="flex items-start justify-between gap-4 py-3"><dt>Customer</dt><dd className="text-right font-bold">{receipt.customerName}</dd></div>
           <div className="flex items-start justify-between gap-4 py-3"><dt>Delivery</dt><dd className="text-right font-bold"><time dateTime={receipt.response.deliveryDate}>{formatShortDate(receipt.response.deliveryDate)}</time> · {formatWindow(receipt.delivery)}</dd></div>
-          {receipt.lines.map((line) => <div key={line.id} className="flex items-start justify-between gap-4 py-3"><dt>{line.quantity}× {line.productSlug} · L{line.level}</dt><dd className="text-right font-bold">{formatPesos(Math.round(receipt.response.totalCentavos * (line.quantity / Math.max(1, totalCups(receipt.lines)))))}</dd></div>)}
+          {receipt.lines.map((line) => <div key={line.id} className="flex items-start justify-between gap-4 py-3"><dt>{line.quantity}× {line.productName} · L{line.level}</dt></div>)}
           <div className="flex items-start justify-between gap-4 py-3 text-base font-black"><dt>Total</dt><dd>{formatPesos(receipt.response.totalCentavos)}</dd></div>
         </dl>
         <p className="mt-3 rounded-full bg-[#D8F2E1] px-3 py-1.5 text-xs font-bold text-[#24633B]">{receipt.response.pendingAngelaAcceptance ? 'Pending Angela’s acceptance' : `Submission status: ${receipt.response.status}`}</p>
@@ -208,7 +260,7 @@ function PublicOrderReceiptView({ receipt, onStartAnother }: { receipt: LocalRec
         <section className="rounded-2xl border border-[#4F74C8]/15 bg-[#EAF0FF] p-4" aria-labelledby="receipt-payment-heading">
           <h2 id="receipt-payment-heading" className="text-xl font-black text-[#20242F]">Pay through GCash</h2>
           <p className="mt-2 text-sm font-bold text-[#586782]">GCash: {receipt.paymentAccount}</p>
-          <p className="mt-1 text-sm leading-5 text-[#586782]">Send your screenshot in Viber after submitting. This receipt does not verify payment.</p>
+          <p className="mt-1 text-sm leading-5 text-[#586782]">Send your screenshot in Viber. Payment is not verified here.</p>
         </section>
         <button type="button" onClick={() => void copy()} disabled={copyState === 'copying'} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#4F74C8] px-4 font-bold text-white shadow-sm transition-colors hover:bg-[#365AA9] active:scale-[0.98] disabled:cursor-wait disabled:opacity-60 motion-safe:transition-transform">
           {copyState === 'copying' ? <LoaderCircle aria-hidden="true" className="motion-safe:animate-spin" size={17} /> : copyState === 'copied' ? <Check aria-hidden="true" size={17} /> : <Clipboard aria-hidden="true" size={17} />}
@@ -222,43 +274,28 @@ function PublicOrderReceiptView({ receipt, onStartAnother }: { receipt: LocalRec
 }
 
 export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisionChange }: PublicOrderFormProps) {
-  const remembered = useMemo<RememberedPublicOrderDetails | null>(() => {
-    if (!storage) return null
-    try {
-      const raw = storage.getItem('public-order-details-v1')
-      if (!raw) return null
-      const parsed: unknown = JSON.parse(raw)
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-      const value = parsed as Record<string, unknown>
-      if (typeof value.customerName !== 'string' || typeof value.customerPhone !== 'string' || typeof value.address !== 'string') return null
-      return { customerName: value.customerName, customerPhone: value.customerPhone, address: value.address }
-    } catch {
-      return null
-    }
-  }, [storage])
-  const [lines, setLines] = useState<OrderLine[]>([])
-  const [thermalBags, setThermalBags] = useState<ThermalBagLine[]>([])
-  const [customerName, setCustomerName] = useState(remembered?.customerName ?? '')
-  const [customerPhone, setCustomerPhone] = useState(remembered?.customerPhone ?? '')
-  const [address, setAddress] = useState(remembered?.address ?? '')
-  const [notes, setNotes] = useState('')
+  const remembered = useMemo(() => readRememberedPublicOrderDetails(storage), [storage])
+  const [restoredAttempt] = useState(() => readPublicOrderAttempt())
+  const restoredPayload = restoredAttempt?.payload ?? null
+  const [lines, setLines] = useState<OrderLine[]>(() => restoredPayload?.items.length ? linesFromPayload(restoredPayload.items) : (menu.products[0] ? [defaultLine(menu.products[0])] : []))
+  const [thermalBags, setThermalBags] = useState<ThermalBagLine[]>(() => restoredPayload ? bagsFromPayload(restoredPayload.thermalBags) : [])
+  const [customerName, setCustomerName] = useState(restoredPayload?.customerName ?? remembered?.customerName ?? '')
+  const [customerPhone, setCustomerPhone] = useState(restoredPayload?.customerPhone ?? remembered?.customerPhone ?? '')
+  const [address, setAddress] = useState(restoredPayload?.address ?? remembered?.address ?? '')
+  const [notes, setNotes] = useState(restoredPayload?.notes ?? '')
+  const [honeypot, setHoneypot] = useState(restoredPayload?.honeypot ?? '')
   const [rememberDetails, setRememberDetails] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
-  const [formError, setFormError] = useState<string | null>(null)
+  const [formError, setFormError] = useState<string | null>(() => restoredAttempt?.uncertain ? RESTORED_UNCERTAIN_MESSAGE : null)
   const [formNotice, setFormNotice] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [reconfirm, setReconfirm] = useState<ReconfirmState | null>(null)
   const [receipt, setReceipt] = useState<LocalReceipt | null>(null)
-  const submissionKeyRef = useRef(newIdempotencyKey())
-  const submissionAttemptedRef = useRef(false)
+  const [orderLocked, setOrderLocked] = useState(() => Boolean(restoredAttempt?.uncertain))
+  const submissionKeyRef = useRef(restoredPayload?.idempotencyKey ?? newIdempotencyKey())
+  const lastAttemptRef = useRef<PublicOrderInput | null>(restoredPayload)
+  const uncertainTransportRef = useRef(Boolean(restoredAttempt?.uncertain))
   const submittingRef = useRef(false)
-  const initializedRef = useRef(false)
-
-  useEffect(() => {
-    if (initializedRef.current || menu.products.length === 0) return
-    initializedRef.current = true
-    setLines([defaultLine(menu.products[0])])
-  }, [menu.products])
 
   useEffect(() => {
     if (!rememberDetails) return
@@ -276,16 +313,14 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
   const totalCupsInOrder = totalCups(lines)
 
   const invalidateSubmission = () => {
-    if (submissionAttemptedRef.current) {
-      submissionKeyRef.current = newIdempotencyKey()
-      submissionAttemptedRef.current = false
-    }
+    if (uncertainTransportRef.current || orderLocked) return
     setReconfirm(null)
     setFormNotice(null)
     setFormError(null)
   }
 
   const updateField = (field: keyof FieldErrors, value: string) => {
+    if (orderLocked) return
     invalidateSubmission()
     if (field === 'customerName') setCustomerName(value)
     if (field === 'customerPhone') setCustomerPhone(value)
@@ -294,6 +329,7 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
   }
 
   const updateLine = (id: string, patch: Partial<OrderLine>) => {
+    if (orderLocked) return
     invalidateSubmission()
     setLines((current) => current.map((line) => line.id === id ? { ...line, ...patch } : line))
   }
@@ -312,13 +348,13 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
 
   const addDrink = () => {
     const product = menu.products[0]
-    if (!product || totalCupsInOrder >= MAX_CUPS_PER_ORDER) return
+    if (orderLocked || !product || totalCupsInOrder >= MAX_CUPS_PER_ORDER) return
     invalidateSubmission()
     setLines((current) => [...current, defaultLine(product)])
   }
 
   const removeDrink = (id: string) => {
-    if (lines.length <= 1) return
+    if (orderLocked || lines.length <= 1) return
     invalidateSubmission()
     setLines((current) => current.filter((line) => line.id !== id))
   }
@@ -329,12 +365,13 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
   }
 
   const addThermalBag = () => {
-    if (thermalBags.length >= totalCupsInOrder || thermalBags.length >= MAX_CUPS_PER_ORDER) return
+    if (orderLocked || thermalBags.length >= totalCupsInOrder || thermalBags.length >= MAX_CUPS_PER_ORDER) return
     invalidateSubmission()
     setThermalBags((current) => [...current, { id: localId('bag'), coveredCupCount: 1 }])
   }
 
   const updateThermalBag = (id: string, value: string) => {
+    if (orderLocked) return
     invalidateSubmission()
     if (!value) {
       setThermalBags((current) => current.filter((bag) => bag.id !== id))
@@ -358,50 +395,91 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
 
   const submit = async () => {
     if (submittingRef.current) return
-    if (reconfirm && !reconfirm.confirmed) {
+    const retryingStored = Boolean(lastAttemptRef.current && (uncertainTransportRef.current || reconfirm?.confirmed || orderLocked))
+    if (!retryingStored) {
+      if (reconfirm && !reconfirm.confirmed) {
+        setFormError('Review the updated delivery date and total, then confirm the updated quote before submitting again.')
+        return
+      }
+      if (!validate()) {
+        setFormError('Complete the required customer details before submitting.')
+        return
+      }
+      if (!displayTotals || localQuoteResult.error) {
+        setFormError(localQuoteResult.error ?? 'Add a valid drink selection before submitting.')
+        return
+      }
+    } else if (reconfirm && !reconfirm.confirmed) {
       setFormError('Review the updated delivery date and total, then confirm the updated quote before submitting again.')
-      return
-    }
-    if (!validate()) {
-      setFormError('Complete the required customer details before submitting.')
-      return
-    }
-    if (!displayTotals || localQuoteResult.error) {
-      setFormError(localQuoteResult.error ?? 'Add a valid drink selection before submitting.')
       return
     }
     const delivery = reconfirm?.delivery ?? menu.delivery
     const quoteRevision = reconfirm?.quoteRevision ?? menu.quoteRevision
-    const input = {
-      customerName: customerName.trim(),
-      customerPhone: customerPhone.trim(),
-      address: address.trim(),
-      deliveryDate: delivery.deliveryDate,
-      notes: notes.trim() || null,
-      items: draft.items,
-      thermalBags: draft.thermalBags,
-      quoteRevision,
-      quotedTotalCentavos: displayTotals.totalCentavos,
-      idempotencyKey: submissionKeyRef.current,
-      honeypot: '',
-    }
-    submissionAttemptedRef.current = true
+    const input = retryingStored && lastAttemptRef.current
+      ? lastAttemptRef.current
+      : {
+        customerName: customerName.trim(),
+        customerPhone: customerPhone.trim(),
+        address: address.trim(),
+        deliveryDate: delivery.deliveryDate,
+        notes: notes.trim() || null,
+        items: draft.items,
+        thermalBags: draft.thermalBags,
+        quoteRevision,
+        quotedTotalCentavos: displayTotals!.totalCentavos,
+        idempotencyKey: submissionKeyRef.current,
+        honeypot,
+      }
+    lastAttemptRef.current = input
+    persistAttempt(input, true)
     submittingRef.current = true
     setSubmitting(true)
     setFormError(null)
     setFormNotice(null)
     try {
       const response = await submitPublicOrder(input, { endpoint, fetcher })
-      setReceipt({ response, customerName: customerName.trim(), customerPhone: customerPhone.trim(), address: address.trim(), lines: lines.map((line) => ({ ...line, cupNames: [...line.cupNames] })), thermalBags: thermalBags.map((bag) => ({ ...bag })), paymentAccount: menu.payment.account, delivery })
+      uncertainTransportRef.current = false
+      lastAttemptRef.current = null
+      setOrderLocked(false)
+      clearPublicOrderAttempt()
+      setReceipt({
+        response,
+        customerName: input.customerName,
+        customerPhone: input.customerPhone,
+        address: input.address,
+        lines: lines.map((line) => ({ ...line, cupNames: [...line.cupNames], productName: productNameFor(menu, line.productSlug) })),
+        thermalBags: thermalBags.map((bag) => ({ ...bag })),
+        paymentAccount: menu.payment.account,
+        delivery,
+      })
       setReconfirm(null)
       setFormNotice(null)
     } catch (cause) {
       const fresh = getReconfirmation(cause)
       if (fresh) {
-        onMenuRevisionChange({ delivery: fresh.delivery, quoteRevision: fresh.quoteRevision })
+        uncertainTransportRef.current = false
+        persistAttempt(input, false)
+        setOrderLocked(true)
+        try {
+          onMenuRevisionChange(await getPublicOrderMenu({ endpoint, fetcher }))
+        } catch {
+          // Keep showing the server quote even if the full menu refresh fails.
+        }
         setReconfirm({ ...fresh, confirmed: false })
         setFormError(fresh.error)
+      } else if (isUncertainTransport(cause)) {
+        uncertainTransportRef.current = true
+        persistAttempt(input, true)
+        setOrderLocked(true)
+        setFormError(UNCERTAIN_RETRY_MESSAGE)
+      } else if (isKeyMismatch(cause)) {
+        uncertainTransportRef.current = false
+        persistAttempt(input, false)
+        setOrderLocked(true)
+        setFormError(publicOrderErrorMessage(cause))
       } else {
+        uncertainTransportRef.current = false
+        persistAttempt(input, false)
         setFormError(publicOrderErrorMessage(cause))
       }
     } finally {
@@ -412,12 +490,25 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
 
   const confirmUpdatedQuote = () => {
     if (!reconfirm) return
+    const previous = lastAttemptRef.current
+    if (previous) {
+      const updated = {
+        ...previous,
+        deliveryDate: reconfirm.delivery.deliveryDate,
+        quoteRevision: reconfirm.quoteRevision,
+        quotedTotalCentavos: reconfirm.quote.totalCentavos,
+        idempotencyKey: submissionKeyRef.current,
+      }
+      lastAttemptRef.current = updated
+      persistAttempt(updated, false)
+    }
     setReconfirm({ ...reconfirm, confirmed: true })
     setFormError(null)
     setFormNotice(`Updated total ${formatPesos(reconfirm.quote.totalCentavos)} for ${formatLongDate(reconfirm.delivery.deliveryDate)} is ready. Submit again when you are ready.`)
   }
 
   const resetDetails = () => {
+    if (orderLocked) return
     clearRememberedPublicOrderDetails(storage)
     setCustomerName('')
     setCustomerPhone('')
@@ -431,12 +522,16 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
   const startAnother = () => {
     const first = menu.products[0]
     if (!first) return
-    submissionAttemptedRef.current = false
+    uncertainTransportRef.current = false
+    lastAttemptRef.current = null
     submissionKeyRef.current = newIdempotencyKey()
+    setOrderLocked(false)
+    clearPublicOrderAttempt()
     setReceipt(null)
     setReconfirm(null)
     setLines([defaultLine(first)])
     setThermalBags([])
+    setHoneypot('')
     setFieldErrors({})
     setFormError(null)
     setFormNotice(null)
@@ -445,6 +540,12 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
   if (receipt) return <PublicOrderReceiptView receipt={receipt} onStartAnother={startAnother} />
 
   return <form className="public-order-form" onSubmit={(event) => { event.preventDefault(); void submit() }} noValidate>
+    <div className="absolute left-[-10000px] top-auto h-px w-px overflow-hidden" aria-hidden="true">
+      <label>
+        Company website
+        <input name="company_website" type="text" value={honeypot} autoComplete="off" tabIndex={-1} onChange={(event) => setHoneypot(event.target.value)} />
+      </label>
+    </div>
     <section className="motion-fade-up" aria-labelledby="public-order-heading">
       <p className="text-xs font-black uppercase tracking-[0.16em] text-[#4F74C8]">Order link</p>
       <h1 id="public-order-heading" className="mt-2 text-3xl font-black tracking-tight text-[#20242F] sm:text-4xl">Order for <time dateTime={menu.delivery.deliveryDate}>{formatShortDate(menu.delivery.deliveryDate)}</time></h1>
@@ -468,35 +569,35 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
           const levelGroup = product.family === 'matcha' ? 'matcha_level' : 'hojicha_level'
           return <article key={line.id} className="rounded-xl border border-[#4F74C8]/15 bg-white/70 p-3">
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_6rem_minmax(12rem,14rem)] lg:items-end">
-              <Field label={`Drink ${index + 1}`}><select aria-label={`Drink ${index + 1}`} className={selectClass} value={line.productSlug} onChange={(event) => updateProduct(line, event.target.value as ProductSlug)}>{menu.products.map((entry) => <option key={entry.slug} value={entry.slug}>{entry.name} · {formatPesos(entry.basePriceCentavos)}</option>)}</select></Field>
-              <Field label="Qty"><input aria-label={`Quantity for drink ${index + 1}`} className={inputClass} type="number" min="1" max={MAX_CUPS_PER_ORDER} inputMode="numeric" value={line.quantity} onChange={(event) => updateQuantity(line, event.target.value)} /></Field>
-              <Field label="Options"><select aria-label={`Level for drink ${index + 1}`} className={selectClass} value={line.level} onChange={(event) => updateLine(line.id, { level: Number(event.target.value) as 1 | 2 | 3 })}>{modifierGroup(product, levelGroup) && ([1, 2, 3] as const).map((level) => <option key={level} value={level}>{levelLabel(product.family, level)}{product.levelUpcharges[level] ? ` · +${formatPesos(product.levelUpcharges[level])}` : ''}</option>)}</select></Field>
+              <Field label={`Drink ${index + 1}`}><select aria-label={`Drink ${index + 1}`} className={selectClass} value={line.productSlug} disabled={orderLocked} onChange={(event) => updateProduct(line, event.target.value as ProductSlug)}>{menu.products.map((entry) => <option key={entry.slug} value={entry.slug}>{entry.name} · {formatPesos(entry.basePriceCentavos)}</option>)}</select></Field>
+              <Field label="Qty"><input aria-label={`Quantity for drink ${index + 1}`} className={inputClass} type="number" min="1" max={MAX_CUPS_PER_ORDER} inputMode="numeric" value={line.quantity} disabled={orderLocked} onChange={(event) => updateQuantity(line, event.target.value)} /></Field>
+              <Field label="Options"><select aria-label={`Level for drink ${index + 1}`} className={selectClass} value={line.level} disabled={orderLocked} onChange={(event) => updateLine(line.id, { level: Number(event.target.value) as 1 | 2 | 3 })}>{modifierGroup(product, levelGroup) && ([1, 2, 3] as const).map((level) => <option key={level} value={level}>{levelLabel(product.family, level)}{product.levelUpcharges[level] ? ` · +${formatPesos(product.levelUpcharges[level])}` : ''}</option>)}</select></Field>
             </div>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              {modifierGroup(product, 'powder') && <Field label="Powder"><select aria-label={`Powder for drink ${index + 1}`} className={selectClass} value={line.powder} onChange={(event) => updateLine(line.id, { powder: event.target.value as Powder })}><option value="yumeno">Yumeno{product.powderUpcharges.yumeno ? ` · +${formatPesos(product.powderUpcharges.yumeno)}` : ''}</option><option value="mk_isuzu">MK Isuzu{product.powderUpcharges.mk_isuzu ? ` · +${formatPesos(product.powderUpcharges.mk_isuzu)}` : ''}</option></select></Field>}
-              {modifierGroup(product, 'sweetness') && product.sweetnessOptions.length > 0 && <Field label="Sweetness"><select aria-label={`Sweetness for drink ${index + 1}`} className={selectClass} value={line.sweetness ?? product.sweetnessOptions[0]} onChange={(event) => updateLine(line.id, { sweetness: event.target.value as Sweetness })}>{product.sweetnessOptions.map((sweetness) => <option key={sweetness} value={sweetness}>{sweetness.slice(0, 1).toUpperCase() + sweetness.slice(1)}</option>)}</select></Field>}
+              {modifierGroup(product, 'powder') && <Field label="Powder"><select aria-label={`Powder for drink ${index + 1}`} className={selectClass} value={line.powder} disabled={orderLocked} onChange={(event) => updateLine(line.id, { powder: event.target.value as Powder })}><option value="yumeno">Yumeno{product.powderUpcharges.yumeno ? ` · +${formatPesos(product.powderUpcharges.yumeno)}` : ''}</option><option value="mk_isuzu">MK Isuzu{product.powderUpcharges.mk_isuzu ? ` · +${formatPesos(product.powderUpcharges.mk_isuzu)}` : ''}</option></select></Field>}
+              {modifierGroup(product, 'sweetness') && product.sweetnessOptions.length > 0 && <Field label="Sweetness"><select aria-label={`Sweetness for drink ${index + 1}`} className={selectClass} value={line.sweetness ?? product.sweetnessOptions[0]} disabled={orderLocked} onChange={(event) => updateLine(line.id, { sweetness: event.target.value as Sweetness })}>{product.sweetnessOptions.map((sweetness) => <option key={sweetness} value={sweetness}>{sweetness.slice(0, 1).toUpperCase() + sweetness.slice(1)}</option>)}</select></Field>}
             </div>
             <div className="mt-3 border-t border-[#4F74C8]/15 pt-3">
               <p className="text-sm font-bold text-[#20242F]">Cup names <span className="font-normal text-[#586782]">(optional)</span></p>
-              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{line.cupNames.map((name, cupIndex) => <label key={`${line.id}-${cupIndex}`} className="text-sm font-semibold text-[#20242F]"><span>Cup {cupIndex + 1}</span><input aria-label={`Cup ${cupIndex + 1} name for drink ${index + 1}`} className={inputClass} maxLength={40} value={name} placeholder="Optional" onChange={(event) => updateCupName(line, cupIndex, event.target.value)} /></label>)}</div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{line.cupNames.map((name, cupIndex) => <label key={`${line.id}-${cupIndex}`} className="text-sm font-semibold text-[#20242F]"><span>Cup {cupIndex + 1}</span><input aria-label={`Cup ${cupIndex + 1} name for drink ${index + 1}`} className={inputClass} maxLength={40} value={name} placeholder="Optional" disabled={orderLocked} onChange={(event) => updateCupName(line, cupIndex, event.target.value)} /></label>)}</div>
             </div>
-            {lines.length > 1 && <button type="button" onClick={() => removeDrink(line.id)} className="mt-3 inline-flex min-h-11 items-center gap-1 rounded-xl px-2 text-sm font-semibold text-rose-700 transition-colors hover:bg-rose-50"><Trash2 aria-hidden="true" size={16} />Remove drink</button>}
+            {lines.length > 1 && <button type="button" disabled={orderLocked} onClick={() => removeDrink(line.id)} className="mt-3 inline-flex min-h-11 items-center gap-1 rounded-xl px-2 text-sm font-semibold text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"><Trash2 aria-hidden="true" size={16} />Remove drink</button>}
           </article>
         })}
       </div>
-      <button type="button" disabled={totalCupsInOrder >= MAX_CUPS_PER_ORDER} onClick={addDrink} className="mt-4 flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#4F74C8]/35 px-4 text-sm font-bold text-[#365AA9] transition-colors hover:bg-[#4F74C8]/10 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"><Plus aria-hidden="true" size={17} />Add another drink</button>
+      <button type="button" disabled={orderLocked || totalCupsInOrder >= MAX_CUPS_PER_ORDER} onClick={addDrink} className="mt-4 flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#4F74C8]/35 px-4 text-sm font-bold text-[#365AA9] transition-colors hover:bg-[#4F74C8]/10 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"><Plus aria-hidden="true" size={17} />Add another drink</button>
     </section>
 
     <section className={`${cardClass} mt-4`} aria-labelledby="customer-heading">
       <h2 id="customer-heading" className="text-lg font-black text-[#20242F]">Your details</h2>
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
-        <Field label="Name" error={fieldErrors.customerName}><input aria-label="Name" aria-invalid={Boolean(fieldErrors.customerName)} className={inputClass} value={customerName} autoComplete="name" onChange={(event) => updateField('customerName', event.target.value)} /></Field>
-        <Field label="Viber number" error={fieldErrors.customerPhone}><input aria-label="Viber number" aria-invalid={Boolean(fieldErrors.customerPhone)} className={inputClass} type="tel" inputMode="tel" autoComplete="tel" value={customerPhone} placeholder="09XX XXX XXXX" onChange={(event) => updateField('customerPhone', event.target.value)} /></Field>
-        <Field label="Delivery address" error={fieldErrors.address}><input aria-label="Delivery address" aria-invalid={Boolean(fieldErrors.address)} className={inputClass} autoComplete="street-address" value={address} placeholder="Street, barangay, city" onChange={(event) => updateField('address', event.target.value)} /></Field>
-        <Field label="Notes (optional)"><textarea aria-label="Notes (optional)" className={`${inputClass} min-h-11 resize-y py-2`} rows={1} maxLength={500} value={notes} placeholder="Anything Angela should know?" onChange={(event) => { invalidateSubmission(); setNotes(event.target.value) }} /></Field>
+        <Field label="Name" error={fieldErrors.customerName}><input aria-label="Name" aria-invalid={Boolean(fieldErrors.customerName)} className={inputClass} value={customerName} autoComplete="name" disabled={orderLocked} onChange={(event) => updateField('customerName', event.target.value)} /></Field>
+        <Field label="Viber number" error={fieldErrors.customerPhone}><input aria-label="Viber number" aria-invalid={Boolean(fieldErrors.customerPhone)} className={inputClass} type="tel" inputMode="tel" autoComplete="tel" value={customerPhone} placeholder="09XX XXX XXXX" disabled={orderLocked} onChange={(event) => updateField('customerPhone', event.target.value)} /></Field>
+        <Field label="Delivery address" error={fieldErrors.address}><input aria-label="Delivery address" aria-invalid={Boolean(fieldErrors.address)} className={inputClass} autoComplete="street-address" value={address} placeholder="Street, barangay, city" disabled={orderLocked} onChange={(event) => updateField('address', event.target.value)} /></Field>
+        <Field label="Notes (optional)"><textarea aria-label="Notes (optional)" className={`${inputClass} min-h-11 resize-y py-2`} rows={1} maxLength={500} value={notes} placeholder="Anything Angela should know?" disabled={orderLocked} onChange={(event) => { if (orderLocked) return; invalidateSubmission(); setNotes(event.target.value) }} /></Field>
       </div>
-      <label className="mt-4 flex min-h-11 items-center gap-2 text-sm font-semibold text-[#20242F]"><input type="checkbox" checked={rememberDetails} onChange={(event) => setRememberDetails(event.target.checked)} />Remember my details on this device</label>
-      <button type="button" onClick={resetDetails} className="mt-2 min-h-11 text-left text-sm font-bold text-[#365AA9] underline underline-offset-2 hover:text-[#20242F]">Reset saved details</button>
+      <label className="mt-4 flex min-h-11 items-center gap-2 text-sm font-semibold text-[#20242F]"><input type="checkbox" checked={rememberDetails} disabled={orderLocked} onChange={(event) => setRememberDetails(event.target.checked)} />Remember my details on this device</label>
+      <button type="button" disabled={orderLocked} onClick={resetDetails} className="mt-2 min-h-11 text-left text-sm font-bold text-[#365AA9] underline underline-offset-2 hover:text-[#20242F] disabled:cursor-not-allowed disabled:opacity-50">Reset saved details</button>
     </section>
 
     <section className={`${cardClass} mt-4`} aria-labelledby="summary-heading">
@@ -504,12 +605,12 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
       {localQuoteResult.error && <p role="alert" className="mt-3 text-sm font-semibold text-red-700">{localQuoteResult.error}</p>}
       <div className="mt-4">
         <div className="flex items-baseline justify-between gap-3"><h3 className="text-sm font-bold text-[#20242F]">Thermal bags</h3><p className="text-sm text-[#586782]">{displayTotals ? formatPesos(displayTotals.thermalBagsTotalCentavos) : '—'}</p></div>
-        <div className="mt-2 space-y-2">{thermalBags.map((bag, index) => <div key={bag.id} className="flex items-end gap-2"><Field label={index === 0 ? 'Thermal bag' : `Thermal bag ${index + 1}`}><select aria-label={index === 0 ? 'Thermal bag' : `Thermal bag ${index + 1}`} className={selectClass} value={bag.coveredCupCount} onChange={(event) => updateThermalBag(bag.id, event.target.value)}>{([1, 2, 3, 4] as const).map((coveredCupCount) => <option key={coveredCupCount} value={coveredCupCount}>{coveredCupCount} {coveredCupCount === 1 ? 'cup' : 'cups'} · {formatPesos(menu.products[0]?.thermalBagPrices[coveredCupCount] ?? 0)}</option>)}</select></Field><button type="button" aria-label={`Remove thermal bag ${index + 1}`} onClick={() => updateThermalBag(bag.id, '')} className="mb-0 min-h-11 rounded-xl px-2 text-[#586782] hover:bg-rose-50 hover:text-rose-700"><Trash2 aria-hidden="true" size={17} /></button></div>)}</div>
+        <div className="mt-2 space-y-2">{thermalBags.map((bag, index) => <div key={bag.id} className="flex items-end gap-2"><Field label={index === 0 ? 'Thermal bag' : `Thermal bag ${index + 1}`}><select aria-label={index === 0 ? 'Thermal bag' : `Thermal bag ${index + 1}`} className={selectClass} value={bag.coveredCupCount} disabled={orderLocked} onChange={(event) => updateThermalBag(bag.id, event.target.value)}>{([1, 2, 3, 4] as const).map((coveredCupCount) => <option key={coveredCupCount} value={coveredCupCount}>{coveredCupCount} {coveredCupCount === 1 ? 'cup' : 'cups'} · {formatPesos(menu.products[0]?.thermalBagPrices[coveredCupCount] ?? 0)}</option>)}</select></Field><button type="button" aria-label={`Remove thermal bag ${index + 1}`} disabled={orderLocked} onClick={() => updateThermalBag(bag.id, '')} className="mb-0 min-h-11 rounded-xl px-2 text-[#586782] hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"><Trash2 aria-hidden="true" size={17} /></button></div>)}</div>
         {thermalBags.length === 0 && <p className="mt-1 text-sm text-[#586782]">No bag selected.</p>}
-        <button type="button" disabled={thermalBags.length >= totalCupsInOrder || totalCupsInOrder === 0} onClick={addThermalBag} className="mt-2 inline-flex min-h-11 items-center gap-1 rounded-xl px-2 text-sm font-bold text-[#365AA9] transition-colors hover:bg-[#4F74C8]/10 disabled:cursor-not-allowed disabled:opacity-50"><Plus aria-hidden="true" size={16} />Add thermal bag</button>
+        <button type="button" disabled={orderLocked || thermalBags.length >= totalCupsInOrder || totalCupsInOrder === 0} onClick={addThermalBag} className="mt-2 inline-flex min-h-11 items-center gap-1 rounded-xl px-2 text-sm font-bold text-[#365AA9] transition-colors hover:bg-[#4F74C8]/10 disabled:cursor-not-allowed disabled:opacity-50"><Plus aria-hidden="true" size={16} />Add thermal bag</button>
       </div>
       <div className="mt-5 rounded-xl bg-[#EAF0FF] p-3"><h3 className="font-black text-[#20242F]">{menu.payment.method} payment</h3><p className="mt-1 text-sm font-bold text-[#586782]">{menu.payment.account}</p><p className="mt-1 text-sm leading-5 text-[#586782]">{menu.payment.instructions}</p></div>
-      <button type="submit" disabled={submitting || !displayTotals || Boolean(localQuoteResult.error) || Boolean(reconfirm && !reconfirm.confirmed)} className="mt-4 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#4F74C8] px-4 font-bold text-white shadow-sm transition-colors hover:bg-[#365AA9] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 motion-safe:transition-transform">{submitting && <LoaderCircle aria-hidden="true" className="motion-safe:animate-spin" size={18} />}{submitting ? 'Submitting order…' : reconfirm && !reconfirm.confirmed ? 'Confirm updated quote above' : 'Review and submit order'}</button>
+      <button type="submit" disabled={submitting || Boolean(reconfirm && !reconfirm.confirmed) || (!orderLocked && (!displayTotals || Boolean(localQuoteResult.error)))} className="mt-4 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#4F74C8] px-4 font-bold text-white shadow-sm transition-colors hover:bg-[#365AA9] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 motion-safe:transition-transform">{submitting && <LoaderCircle aria-hidden="true" className="motion-safe:animate-spin" size={18} />}{submitting ? 'Submitting order…' : reconfirm && !reconfirm.confirmed ? 'Confirm updated quote above' : 'Review and submit order'}</button>
     </section>
   </form>
 }

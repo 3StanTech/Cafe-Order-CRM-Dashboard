@@ -2,6 +2,7 @@ import { LoaderCircle } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import gellyLogo from '../../assets/brand/gelly-logo-mark.png'
+import { clearAllImportWorkspaces } from '../import/draft-recovery'
 import { DASHBOARD_AUTH_EMAIL, getAuthClient, isDemoMode, type AuthClient } from './supabaseAuth'
 
 type AuthState = 'loading' | 'signed-out' | 'signed-in'
@@ -10,6 +11,13 @@ type AuthBoundaryProps = {
   children: ReactNode
   client?: AuthClient | null
   demoMode?: boolean
+}
+
+export const GELLY_AUTH_SIGNED_OUT_EVENT = 'gelly-auth-signed-out'
+
+function dispatchAuthSignedOut() {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent(GELLY_AUTH_SIGNED_OUT_EVENT))
 }
 
 export function AuthBoundary({ children, client = getAuthClient(), demoMode = isDemoMode }: AuthBoundaryProps) {
@@ -28,7 +36,13 @@ export function AuthBoundary({ children, client = getAuthClient(), demoMode = is
     }
 
     void client.auth.getSession().then(({ data }) => applySession(data.session)).catch(() => applySession(null))
-    const { data: listener } = client.auth.onAuthStateChange((_event, session) => applySession(session))
+    const { data: listener } = client.auth.onAuthStateChange((event, session) => {
+      applySession(session)
+      if (event === 'SIGNED_OUT') {
+        clearAllImportWorkspaces()
+        dispatchAuthSignedOut()
+      }
+    })
 
     return () => {
       active = false
@@ -136,7 +150,11 @@ function AuthenticatedSession({ children, client, onSignedOut }: { children: Rea
     setSigningOut(true)
     try {
       const { error } = await client.auth.signOut()
-      if (!error) onSignedOut()
+      if (!error) {
+        clearAllImportWorkspaces()
+        dispatchAuthSignedOut()
+        onSignedOut()
+      }
     } catch {
       // The existing session remains active if Supabase cannot complete sign-out.
     } finally {

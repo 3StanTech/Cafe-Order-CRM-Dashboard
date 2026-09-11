@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { AuthBoundary } from '../AuthBoundary'
+import { getImportRecoveryStorageKey, saveImportWorkspace } from '../../import/draft-recovery'
+import { AuthBoundary, GELLY_AUTH_SIGNED_OUT_EVENT } from '../AuthBoundary'
 import type { AuthClient } from '../supabaseAuth'
 
 type SessionState = { session: object | null }
@@ -33,6 +34,11 @@ function renderBoundary(client: AuthClient, demoMode = false) {
 }
 
 describe('AuthBoundary', () => {
+  afterEach(() => {
+    window.history.pushState({}, '', '/')
+    localStorage.clear()
+  })
+
   it('bypasses the PIN gate in demo mode', () => {
     renderBoundary(createAuthClient(), true)
     expect(screen.getByText('Private dashboard')).toBeInTheDocument()
@@ -72,5 +78,40 @@ describe('AuthBoundary', () => {
     await user.click(screen.getByRole('button', { name: 'Sign out' }))
     await waitFor(() => expect(screen.getByLabelText('PIN')).toBeInTheDocument())
     expect(client.auth.signOut).toHaveBeenCalledOnce()
+  })
+
+  it('dispatches gelly-auth-signed-out on sign-out', async () => {
+    const client = createAuthClient({ session: { access_token: 'test' } })
+    const user = userEvent.setup()
+    const onSignedOut = vi.fn()
+    window.addEventListener(GELLY_AUTH_SIGNED_OUT_EVENT, onSignedOut)
+    renderBoundary(client)
+
+    await screen.findByText('Private dashboard')
+    await user.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(onSignedOut).toHaveBeenCalled())
+    window.removeEventListener(GELLY_AUTH_SIGNED_OUT_EVENT, onSignedOut)
+  })
+
+  it('clears import recovery keys on sign-out even when Import is unmounted', async () => {
+    const ownerA = 'angela@madebyangela.local'
+    const ownerB = 'other@madebyangela.local'
+    expect(saveImportWorkspace(ownerA, { rawText: 'viber paste a', drafts: [] })).toBe(true)
+    expect(saveImportWorkspace(ownerB, { rawText: 'viber paste b', drafts: [] })).toBe(true)
+    const keyA = getImportRecoveryStorageKey(ownerA)
+    const keyB = getImportRecoveryStorageKey(ownerB)
+    expect(localStorage.getItem(keyA)).toBeTruthy()
+    expect(localStorage.getItem(keyB)).toBeTruthy()
+
+    const client = createAuthClient({ session: { access_token: 'test' } })
+    const user = userEvent.setup()
+    renderBoundary(client)
+
+    await screen.findByText('Private dashboard')
+    expect(screen.queryByText('Import')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(screen.getByLabelText('PIN')).toBeInTheDocument())
+    expect(localStorage.getItem(keyA)).toBeNull()
+    expect(localStorage.getItem(keyB)).toBeNull()
   })
 })

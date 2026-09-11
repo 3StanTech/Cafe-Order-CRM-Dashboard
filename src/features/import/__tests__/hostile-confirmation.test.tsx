@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LocalAdapter, resetLocalAdapterMemoryForTests } from '../../../data/local-adapter'
 import { ImportWorkspace } from '../ImportWorkspace'
 import { duplicatePastedJsonLines, splitCustomerStructuralResponse, splitCustomerThread, unsafeText } from '../../../../test/fixtures/import/hostile/hostile-import-fixtures'
@@ -26,7 +26,7 @@ async function renderWorkspace() {
 }
 
 async function pasteAndParse(user: ReturnType<typeof userEvent.setup>, value: string) {
-  const input = screen.getByRole('textbox', { name: 'Order text or JSON' })
+  const input = screen.getByRole('textbox', { name: 'Paste Viber orders' })
   await act(async () => {
     fireEvent.change(input, { target: { value } })
   })
@@ -36,10 +36,21 @@ async function pasteAndParse(user: ReturnType<typeof userEvent.setup>, value: st
   })
 }
 
+async function expandFirstDraft(user: ReturnType<typeof userEvent.setup>) {
+  const editButtons = screen.getAllByRole('button', { name: 'Edit' })
+  await user.click(editButtons[0])
+  expect(await screen.findByText('Editable order draft')).toBeInTheDocument()
+}
+
+beforeEach(() => {
+  localStorage.clear()
+})
+
 afterEach(() => {
   vi.unstubAllGlobals()
   getSessionMock.mockReset()
   getAuthClientMock.mockReset()
+  localStorage.clear()
 })
 
 describe('T6 hostile import transport, rendering, and confirmation audit', () => {
@@ -50,6 +61,7 @@ describe('T6 hostile import transport, rendering, and confirmation audit', () =>
     vi.stubGlobal('fetch', fetchMock)
 
     await pasteAndParse(user, splitCustomerThread)
+    await expandFirstDraft(user)
 
     expect(fetchMock).toHaveBeenCalledOnce()
     expect(await screen.findByRole('textbox', { name: 'Customer name' })).toHaveValue('Paolo Reyes')
@@ -83,6 +95,7 @@ describe('T6 hostile import transport, rendering, and confirmation audit', () =>
     vi.stubGlobal('fetch', fetchMock)
 
     await pasteAndParse(user, 'Please parse this free text')
+    await expandFirstDraft(user)
 
     expect(await screen.findByRole('textbox', { name: 'Customer name' })).toHaveValue(unsafeText)
     expect(screen.getByRole('textbox', { name: 'Address' })).toHaveValue(unsafeText)
@@ -118,6 +131,10 @@ describe('T6 hostile import transport, rendering, and confirmation audit', () =>
     const user = userEvent.setup()
     await pasteAndParse(user, '{"customer_name":"No Address","items":[{"product_slug":"matcha-latte","quantity":1}]}')
     expect(await screen.findByText('Delivery address is missing — review before confirming')).toBeInTheDocument()
+    expect(screen.queryByText('Editable order draft')).not.toBeInTheDocument()
+    await expandFirstDraft(user)
+    expect(screen.getByText('Editable order draft')).toBeInTheDocument()
+    expect(screen.getAllByText('Delivery address is missing — review before confirming').length).toBeGreaterThanOrEqual(2)
     await adapter.close()
   })
 
@@ -126,6 +143,7 @@ describe('T6 hostile import transport, rendering, and confirmation audit', () =>
     const user = userEvent.setup()
     const before = await adapter.listOrders()
     await pasteAndParse(user, '{"customer_name":"Double Dana","items":[{"product_slug":"matcha-latte","quantity":1}],"address":"Makati"}')
+    await expandFirstDraft(user)
     const confirm = await screen.findByRole('button', { name: 'Confirm order' })
     fireEvent.click(confirm)
     fireEvent.click(confirm)
@@ -140,7 +158,8 @@ describe('T6 hostile import transport, rendering, and confirmation audit', () =>
     const before = await adapter.listOrders()
     await pasteAndParse(user, duplicatePastedJsonLines)
 
-    expect(await screen.findAllByText('Editable order draft')).toHaveLength(1)
+    expect(await screen.findByText('1 draft ready')).toBeInTheDocument()
+    await expandFirstDraft(user)
     await user.click(screen.getByRole('button', { name: 'Confirm order' }))
     expect(await screen.findByRole('status')).toHaveTextContent(/was created as new/)
     expect((await adapter.listOrders()).length).toBe(before.length + 1)

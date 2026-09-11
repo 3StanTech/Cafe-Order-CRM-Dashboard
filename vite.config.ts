@@ -90,4 +90,14 @@ export default defineConfig({
       VITE_SUPABASE_ANON_KEY: '',
     },
   },
+  server: process.env.LOCAL_ORDER_FUNCTIONS_URL
+    ? {
+        proxy: {
+          '/.netlify/functions': {
+            target: process.env.LOCAL_ORDER_FUNCTIONS_URL,
+            changeOrigin: true,
+          },
+        },
+      }
+    : undefined,
 })

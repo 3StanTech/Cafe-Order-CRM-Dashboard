@@ -117,6 +117,22 @@ function canonicalInput(input: PublicOrderInput): string {
   })
 }
 
+/** Reviewed quote identity: logical fields + priced total + catalog revision + review version. */
+function reviewCanonical(input: PublicOrderInput, totalCentavos: number, catalogRevision: string, reviewVersion: number): string {
+  return JSON.stringify({
+    customerName: input.customerName,
+    customerPhone: input.customerPhone,
+    address: input.address,
+    deliveryDate: input.deliveryDate,
+    notes: input.notes,
+    items: input.items,
+    thermalBags: input.thermalBags,
+    quotedTotalCentavos: totalCentavos,
+    catalogRevision,
+    reviewVersion,
+  })
+}
+
 export function parsePublicOrderInput(value: unknown): { input: PublicOrderInput } | { error: string } {
   if (!isRecord(value) || !onlyKeys(value, ['customerName', 'customerPhone', 'address', 'deliveryDate', 'notes', 'items', 'thermalBags', 'quoteRevision', 'quotedTotalCentavos', 'idempotencyKey', 'honeypot'])) {
     return { error: 'The order form contains an unsupported field.' }
@@ -233,13 +249,76 @@ function storagePrice(priced: ReturnType<typeof priceOrder>, input: PublicOrderI
 
 function isUniqueViolation(error: { code?: string } | null): boolean { return error?.code === '23505' }
 
-function submissionSelect(): string {
-  return 'id,reference,idempotency_key,request_hash,quote_revision,review_hash,review_version,status,customer_name,customer_phone,address_snapshot,delivery_date,notes,items,thermal_bags,catalog_snapshot,priced_items,subtotal_centavos,delivery_fee_centavos,total_centavos,submitted_snapshot,accepted_order_id,created_at,updated_at'
+const SUBMISSION_SELECT = 'id,reference,idempotency_key,request_hash,quote_revision,review_hash,review_version,status,customer_name,customer_phone,address_snapshot,delivery_date,notes,items,thermal_bags,catalog_snapshot,priced_items,subtotal_centavos,delivery_fee_centavos,total_centavos,submitted_snapshot,accepted_order_id,created_at,updated_at' as const
+
+type PendingEditRow = {
+  id: string
+  status: SubmissionRow['status']
+  total_centavos: number
+  delivery_date: string
+  idempotency_key: string
+  review_version: number
+  review_hash: string
+}
+
+type ReviewCursorRow = {
+  status: string
+  review_version: number | null
+  review_hash: string | null
+}
+
+function asSubmissionRow(value: unknown): SubmissionRow | null {
+  if (!isRecord(value)) return null
+  if (typeof value.id !== 'string' || typeof value.reference !== 'string' || typeof value.request_hash !== 'string' || typeof value.quote_revision !== 'string') return null
+  if (value.status !== 'pending' && value.status !== 'accepted' && value.status !== 'rejected') return null
+  if (typeof value.delivery_date !== 'string' || typeof value.total_centavos !== 'number' || !Number.isSafeInteger(value.total_centavos)) return null
+  const accepted = value.accepted_order_id
+  const row: SubmissionRow = {
+    id: value.id,
+    reference: value.reference,
+    request_hash: value.request_hash,
+    quote_revision: value.quote_revision,
+    status: value.status,
+    delivery_date: value.delivery_date,
+    total_centavos: value.total_centavos,
+    accepted_order_id: typeof accepted === 'string' ? accepted : null,
+  }
+  if (typeof value.idempotency_key === 'string') row.idempotency_key = value.idempotency_key
+  if (typeof value.review_hash === 'string') row.review_hash = value.review_hash
+  if (typeof value.review_version === 'number' && Number.isSafeInteger(value.review_version)) row.review_version = value.review_version
+  if (isRecord(value.submitted_snapshot)) row.submitted_snapshot = value.submitted_snapshot
+  return row
+}
+
+function asPendingEditRow(value: unknown): PendingEditRow | null {
+  if (!isRecord(value)) return null
+  if (typeof value.id !== 'string' || typeof value.delivery_date !== 'string' || typeof value.idempotency_key !== 'string') return null
+  if (value.status !== 'pending' && value.status !== 'accepted' && value.status !== 'rejected') return null
+  if (typeof value.total_centavos !== 'number' || !Number.isSafeInteger(value.total_centavos)) return null
+  if (typeof value.review_version !== 'number' || !Number.isSafeInteger(value.review_version) || typeof value.review_hash !== 'string') return null
+  return {
+    id: value.id,
+    status: value.status,
+    total_centavos: value.total_centavos,
+    delivery_date: value.delivery_date,
+    idempotency_key: value.idempotency_key,
+    review_version: value.review_version,
+    review_hash: value.review_hash,
+  }
+}
+
+function asReviewCursorRow(value: unknown): ReviewCursorRow | null {
+  if (!isRecord(value) || typeof value.status !== 'string') return null
+  return {
+    status: value.status,
+    review_version: typeof value.review_version === 'number' ? value.review_version : null,
+    review_hash: typeof value.review_hash === 'string' ? value.review_hash : null,
+  }
 }
 
 async function existingSubmission(client: SupabaseClient, key: string): Promise<{ row: SubmissionRow | null; error: unknown }> {
-  const result = await client.from('order_submissions').select(submissionSelect()).eq('idempotency_key', key).maybeSingle()
-  return { row: result.data as SubmissionRow | null, error: result.error }
+  const result = await client.from('order_submissions').select(SUBMISSION_SELECT).eq('idempotency_key', key).maybeSingle()
+  return { row: asSubmissionRow(result.data), error: result.error }
 }
 
 function receipt(row: SubmissionRow): Record<string, unknown> {
@@ -294,7 +373,7 @@ export async function submitPublicOrder(client: SupabaseClient, rawBody: string 
     subtotal_centavos: priced.totals.itemsSubtotalCentavos,
     delivery_fee_centavos: priced.totals.thermalBagsTotalCentavos,
     total_centavos: priced.totals.totalCentavos,
-    review_hash: requestHash,
+    review_hash: await sha256(reviewCanonical(parsed.input, priced.totals.totalCentavos, config.revision, 0)),
     review_version: 0,
     submitted_snapshot: {
       customerName: parsed.input.customerName,
@@ -310,20 +389,21 @@ export async function submitPublicOrder(client: SupabaseClient, rawBody: string 
       pricedItems,
     },
   }
-  const inserted = await client.from('order_submissions').insert(payload).select(submissionSelect()).single()
+  const inserted = await client.from('order_submissions').insert(payload).select(SUBMISSION_SELECT).single()
   if (inserted.error && isUniqueViolation(inserted.error)) {
     const raced = await existingSubmission(client, parsed.input.idempotencyKey)
     if (raced.row?.request_hash === requestHash) return { status: 200, body: receipt(raced.row) }
     return { status: 409, body: { error: 'This confirmation key was already used for a different order.' } }
   }
-  if (inserted.error || !inserted.data) return { status: 503, body: { error: 'Online ordering is temporarily unavailable.' } }
-  return { status: 201, body: receipt(inserted.data as SubmissionRow) }
+  const insertedRow = asSubmissionRow(inserted.data)
+  if (inserted.error || !insertedRow) return { status: 503, body: { error: 'Online ordering is temporarily unavailable.' } }
+  return { status: 201, body: receipt(insertedRow) }
 }
 
 export async function listPendingSubmissions(client: SupabaseClient): Promise<CoreResult> {
-  const result = await client.from('order_submissions').select(submissionSelect()).eq('status', 'pending').order('created_at', { ascending: true })
+  const result = await client.from('order_submissions').select(SUBMISSION_SELECT).eq('status', 'pending').order('created_at', { ascending: true })
   if (result.error) return { status: 503, body: { error: 'Pending submissions are temporarily unavailable.' } }
-  return { status: 200, body: { submissions: result.data ?? [] } }
+  return { status: 200, body: { submissions: Array.isArray(result.data) ? result.data : [] } }
 }
 
 /** Owner-only edit path. Adapters must authenticate Angela before calling this elevated write. */
@@ -331,23 +411,39 @@ export async function updatePendingSubmission(client: SupabaseClient, id: string
   if (!/^[0-9a-f-]{36}$/i.test(id) || !rawBody || new TextEncoder().encode(rawBody).byteLength > MAX_SUBMISSION_BODY_BYTES) return { status: 400, body: { error: 'The pending submission edit is invalid.' } }
   let body: unknown
   try { body = JSON.parse(rawBody) } catch { return { status: 400, body: { error: 'The pending submission edit must be valid JSON.' } } }
-  const parsed = parsePublicOrderInput(body)
+  if (!isRecord(body) || !Number.isSafeInteger(body.expectedReviewVersion) || (body.expectedReviewVersion as number) < 0 || typeof body.expectedReviewHash !== 'string' || !/^[0-9a-f]{64}$/i.test(body.expectedReviewHash)) {
+    return { status: 400, body: { error: 'The pending submission edit is missing its current review version.' } }
+  }
+  const expectedReviewVersion = body.expectedReviewVersion as number
+  const expectedReviewHash = body.expectedReviewHash
+  const orderBody = { ...body }
+  delete orderBody.expectedReviewVersion
+  delete orderBody.expectedReviewHash
+  const parsed = parsePublicOrderInput(orderBody)
   if ('error' in parsed) return { status: 400, body: { error: parsed.error } }
-  const current = await client.from('order_submissions').select('id,status,total_centavos,request_hash').eq('id', id).maybeSingle()
+  const current = await client.from('order_submissions').select('id,status,total_centavos,delivery_date,idempotency_key,review_version,review_hash,submitted_snapshot').eq('id', id).maybeSingle()
   if (current.error) return { status: 503, body: { error: 'Pending submissions are temporarily unavailable.' } }
-  if (!current.data) return { status: 404, body: { error: 'Pending submission not found.' } }
-  if (current.data.status !== 'pending') return { status: 409, body: { error: 'Only pending submissions can be edited.' } }
+  const currentRow = asPendingEditRow(current.data)
+  if (!currentRow) return { status: 404, body: { error: 'Pending submission not found.' } }
+  if (currentRow.status !== 'pending') return { status: 409, body: { error: 'Only pending submissions can be edited.' } }
+  if (parsed.input.idempotencyKey !== currentRow.idempotency_key) return { status: 409, body: { error: 'The original confirmation key cannot be changed.' } }
   const config = await publicConfig(client, now)
   if (!config) return { status: 503, body: { error: 'Online ordering is not configured yet.' } }
   const draft: OrderDraft = { items: parsed.input.items.map(({ productSlug, quantity, modifiers }) => ({ productSlug, quantity, modifiers })), thermalBags: parsed.input.thermalBags }
   let priced: ReturnType<typeof priceOrder>
   try { priced = priceOrder(draft, config.settings) } catch (error) { return { status: 422, body: { error: error instanceof PricingError ? error.message : 'The edited selections are unavailable.' } } }
-  if (parsed.input.deliveryDate !== config.nextDelivery?.deliveryDate || parsed.input.quoteRevision !== config.revision || parsed.input.quotedTotalCentavos !== priced.totals.totalCentavos) {
+  const dateChanged = parsed.input.deliveryDate !== currentRow.delivery_date
+  // Keep the submitted date for an address/name/notes edit, even after cutoff.
+  // A changed date is an explicit owner choice and must use the next available run.
+  if (parsed.input.quotedTotalCentavos !== priced.totals.totalCentavos || parsed.input.quoteRevision !== config.revision || (dateChanged && parsed.input.deliveryDate !== config.nextDelivery?.deliveryDate)) {
     return { status: 409, body: { code: 'RECONFIRM_REQUIRED', error: 'The edited delivery date or total changed. Review the updated quote.', ...quoteBody(config, priced) } }
   }
-  const requestHash = await sha256(canonicalInput(parsed.input))
+  // This hash identifies the current owner review revision, including the
+  // verified priced total and catalog revision. request_hash, idempotency_key,
+  // and submitted_snapshot stay immutable.
+  const nextReviewVersion = expectedReviewVersion + 1
+  const reviewHash = await sha256(reviewCanonical(parsed.input, priced.totals.totalCentavos, config.revision, nextReviewVersion))
   const update = await client.from('order_submissions').update({
-    request_hash: requestHash,
     quote_revision: config.revision,
     customer_name: parsed.input.customerName,
     customer_phone: parsed.input.customerPhone,
@@ -361,9 +457,16 @@ export async function updatePendingSubmission(client: SupabaseClient, id: string
     subtotal_centavos: priced.totals.itemsSubtotalCentavos,
     delivery_fee_centavos: priced.totals.thermalBagsTotalCentavos,
     total_centavos: priced.totals.totalCentavos,
-  }).eq('id', id).eq('status', 'pending').select('id,reference,request_hash,quote_revision,status,customer_name,customer_phone,address_snapshot,delivery_date,notes,items,thermal_bags,priced_items,total_centavos,created_at').single()
-  if (update.error || !update.data) return { status: 503, body: { error: 'The pending submission could not be updated.' } }
-  return { status: 200, body: { submission: update.data, previousTotalCentavos: current.data.total_centavos, newTotalCentavos: priced.totals.totalCentavos, differenceCentavos: priced.totals.totalCentavos - current.data.total_centavos } }
+    review_hash: reviewHash,
+    review_version: nextReviewVersion,
+  }).eq('id', id).eq('status', 'pending').eq('review_version', expectedReviewVersion).eq('review_hash', expectedReviewHash).select(SUBMISSION_SELECT).maybeSingle()
+  if (update.error || !isRecord(update.data)) {
+    const latest = await client.from('order_submissions').select('status,review_version,review_hash').eq('id', id).maybeSingle()
+    const cursor = asReviewCursorRow(latest.data)
+    if (cursor) return { status: 409, body: { code: 'REVIEW_STALE', error: 'This submission changed on another device. Refresh it before saving.', status: cursor.status, reviewVersion: cursor.review_version, reviewHash: cursor.review_hash } }
+    return { status: update.error ? 503 : 409, body: { error: 'The pending submission could not be updated.' } }
+  }
+  return { status: 200, body: { submission: update.data, previousTotalCentavos: currentRow.total_centavos, newTotalCentavos: priced.totals.totalCentavos, differenceCentavos: priced.totals.totalCentavos - currentRow.total_centavos } }
 }
 
 export async function acceptSubmission(client: SupabaseClient, id: string, requestHash: string): Promise<CoreResult> {
