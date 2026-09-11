@@ -10,6 +10,8 @@ import {
   priceOrder,
   PricingError,
   PRODUCT_CATALOG,
+  setRuntimeCatalogSettings,
+  type PricingCatalogSnapshot,
   THERMAL_BAG_PRICES,
   type OrderDraft,
 } from '../index'
@@ -156,6 +158,39 @@ describe('priceOrder', () => {
 
     expect(manipulated).toEqual(honest)
     expect(manipulated.totals.totalCentavos).toBe(40000)
+  })
+
+  it('keeps explicit catalog snapshots isolated from mutable runtime settings', () => {
+    const snapshot = (basePrice: number, levelTwo: number, bagPrice: number): PricingCatalogSnapshot => ({
+      productBasePrices: Object.fromEntries(Object.entries(PRODUCT_CATALOG).map(([slug, product]) => [slug, slug === 'matcha-latte' ? basePrice : product.basePriceCentavos])) as PricingCatalogSnapshot['productBasePrices'],
+      productAvailability: Object.fromEntries(Object.keys(PRODUCT_CATALOG).map((slug) => [slug, true])) as PricingCatalogSnapshot['productAvailability'],
+      matchaLevelUpcharges: { 1: 0, 2: levelTwo, 3: levelTwo * 2 },
+      hojichaLevelUpcharges: { 1: 0, 2: 2000, 3: 4000 },
+      powderUpcharges: { yumeno: 0, mk_isuzu: 6000 },
+      thermalBagPrices: { 1: bagPrice, 2: bagPrice + 500, 3: bagPrice + 1000, 4: bagPrice + 1000 },
+    })
+    const order = oneItemOrder({ productSlug: 'matcha-latte', quantity: 2, modifiers: { level: 2, powder: 'yumeno' } })
+    const snapshotA = snapshot(21000, 100, 9100)
+    const snapshotB = snapshot(31000, 900, 1900)
+    const legacy = priceOrder(order)
+
+    try {
+      setRuntimeCatalogSettings({
+        ...snapshot(99000, 5000, 30000),
+      })
+      const pricedA = priceOrder(order, snapshotA)
+      const pricedB = priceOrder(order, snapshotB)
+      const pricedAAgain = priceOrder(order, snapshotA)
+
+      expect(pricedA.items[0]?.unitPriceCentavos).toBe(21100)
+      expect(pricedB.items[0]?.unitPriceCentavos).toBe(31900)
+      expect(pricedAAgain).toEqual(pricedA)
+      expect(priceOrder(order).items[0]?.unitPriceCentavos).toBe(104000)
+    } finally {
+      setRuntimeCatalogSettings(null)
+    }
+
+    expect(priceOrder(order)).toEqual(legacy)
   })
 })
 

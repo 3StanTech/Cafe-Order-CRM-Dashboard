@@ -6,13 +6,14 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "check:server": "tsc -p tsconfig.server.json --noEmit",
     "preview": "vite preview",
     "lint": "oxlint src server netlify api test e2e",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test --project=chromium",
     "check:bundle": "node scripts/check-bundle.mjs",
-    "check": "npm run lint && npm test && npm run build && npm run check:bundle && npm run test:e2e"
+    "check": "npm run lint && npm test && npm run check:server && npm run build && npm run check:bundle && npm run test:e2e"
   },
   "dependencies": {
     "@sentry/react": "^10.68.0",

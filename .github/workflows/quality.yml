@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - main
+      - simplify-cafe-order-intake
 
 jobs:
   quality:
@@ -37,6 +38,9 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Server typecheck
+        run: npm run check:server
 
       - name: Bundle budget
         run: npm run check:bundle

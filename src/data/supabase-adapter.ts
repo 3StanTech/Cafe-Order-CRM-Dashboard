@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import type { Setting, StorageAdapter, StorageChange, StorageCollection, StorageUnsubscribe, StoredCustomer, StoredModifierGroup, StoredOrder, StoredOrderItem, StoredProduct } from './types'
+import type { OrderConfirmationInput, Setting, StorageAdapter, StorageChange, StorageCollection, StorageUnsubscribe, StoredCustomer, StoredModifierGroup, StoredOrder, StoredOrderItem, StoredProduct } from './types'
 
 type Row = Record<string, unknown>
 
@@ -161,6 +161,33 @@ export class SupabaseAdapter implements StorageAdapter {
     const created = fromOrder(await this.insert('orders', toOrder(order)))
     const items = await Promise.all(order.items.map((item) => this.createOrderItem(item)))
     return { ...created, items }
+  }
+
+  /**
+   * The confirmation RPC is deliberately required for imported Viber orders:
+   * it resolves the customer, durable retry key, order, and items in one
+   * transaction. Falling back to createOrder here would make an uncertain retry
+   * capable of creating a duplicate customer or order.
+   */
+  async confirmOrderWithResolution(input: OrderConfirmationInput): Promise<StoredOrder> {
+    const result = await this.rpc<Row>('create_order_with_confirmation', {
+      p_confirmation_key: input.confirmationKey,
+      p_request_hash: input.requestHash,
+      p_order: {
+        ...toOrder(input.order),
+        customer_id: input.customer.id,
+        customer_name: input.customer.name,
+        customer_phone: input.customer.phone,
+      },
+      p_items: input.order.items.map(toItem),
+    })
+    if (!result.ok) {
+      if (result.missing) throw new Error('Durable order confirmation is not available. Apply the pending confirmation migration before importing Viber orders.')
+      throw new Error('Durable order confirmation failed. Review the customer and order details, then try again.')
+    }
+    const row = asRow(result.data)
+    const orderId = string(row, 'id')
+    return fromOrder(row, await this.listOrderItems(orderId))
   }
   async updateOrder(id: string, patch: Partial<Omit<StoredOrder, 'id' | 'createdAt'>>): Promise<StoredOrder> {
     if (patch.items) {

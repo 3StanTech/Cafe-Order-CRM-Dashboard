@@ -1,4 +1,5 @@
 import {
+  PRODUCT_CATALOG,
   getRuntimeCatalog,
   getRuntimeLevelUpcharges,
   getRuntimePowderUpcharges,
@@ -20,6 +21,7 @@ import type {
 } from './contracts'
 import { assertMoneyCentavos } from './money'
 import { PricingError } from './pricing-error'
+import type { RuntimeCatalogSettings } from './catalog'
 
 /** Hard ceiling on total drink cups per order (import, edit, and pricing). */
 export const MAX_CUPS_PER_ORDER = 100
@@ -44,8 +46,9 @@ function multiplyCentavos(unitPrice: MoneyCentavos, quantity: number): MoneyCent
   return total
 }
 
-function getProduct(slug: unknown): MenuProduct {
-  const catalog = getRuntimeCatalog()
+export type PricingCatalogSnapshot = RuntimeCatalogSettings
+
+function getProduct(slug: unknown, catalog: Readonly<Record<ProductSlug, MenuProduct>>): MenuProduct {
   if (typeof slug !== 'string' || !(slug in catalog)) {
     return fail('UNKNOWN_PRODUCT', `Unknown product: ${String(slug)}`)
   }
@@ -59,14 +62,14 @@ function validateQuantity(quantity: unknown): asserts quantity is number {
   }
 }
 
-function validateModifiers(product: MenuProduct, modifiers: unknown): asserts modifiers is DrinkModifiers {
+function validateModifiers(product: MenuProduct, modifiers: unknown, settings?: PricingCatalogSnapshot): asserts modifiers is DrinkModifiers {
   if (!isRecord(modifiers)) {
     fail('UNKNOWN_MODIFIER_OPTION', 'Modifiers must be an object')
   }
 
   const { level, powder, sweetness } = modifiers
-  const levelUpcharges = getRuntimeLevelUpcharges(product.family)
-  const powderUpcharges = getRuntimePowderUpcharges()
+  const levelUpcharges = settings ? (product.family === 'matcha' ? settings.matchaLevelUpcharges : settings.hojichaLevelUpcharges) : getRuntimeLevelUpcharges(product.family)
+  const powderUpcharges = settings?.powderUpcharges ?? getRuntimePowderUpcharges()
 
   if (typeof level !== 'number' || !(level in levelUpcharges)) {
     fail('UNKNOWN_MODIFIER_OPTION', `Unknown ${product.family} level: ${String(level)}`)
@@ -87,17 +90,17 @@ function validateModifiers(product: MenuProduct, modifiers: unknown): asserts mo
   }
 }
 
-function priceItem(draft: OrderItemDraft): PricedOrderItem {
+function priceItem(draft: OrderItemDraft, catalog: Readonly<Record<ProductSlug, MenuProduct>>, settings?: PricingCatalogSnapshot): PricedOrderItem {
   if (!isRecord(draft)) {
     fail('UNKNOWN_PRODUCT', 'Order item must be an object')
   }
 
-  const product = getProduct(draft.productSlug)
+  const product = getProduct(draft.productSlug, catalog)
   validateQuantity(draft.quantity)
-  validateModifiers(product, draft.modifiers)
+  validateModifiers(product, draft.modifiers, settings)
 
-  const levelUpcharge = getRuntimeLevelUpcharges(product.family)[draft.modifiers.level]
-  const powderUpcharge = getRuntimePowderUpcharges()[draft.modifiers.powder as Powder]
+  const levelUpcharge = (settings ? (product.family === 'matcha' ? settings.matchaLevelUpcharges : settings.hojichaLevelUpcharges) : getRuntimeLevelUpcharges(product.family))[draft.modifiers.level]
+  const powderUpcharge = (settings?.powderUpcharges ?? getRuntimePowderUpcharges())[draft.modifiers.powder as Powder]
   const unitPriceCentavos = addCentavos(product.basePriceCentavos, levelUpcharge, powderUpcharge)
 
   return {
@@ -119,8 +122,8 @@ function priceItem(draft: OrderItemDraft): PricedOrderItem {
   }
 }
 
-function priceThermalBag(draft: ThermalBagDraft): ThermalBag {
-  const thermalBagPrices = getRuntimeThermalBagPrices()
+function priceThermalBag(draft: ThermalBagDraft, settings?: PricingCatalogSnapshot): ThermalBag {
+  const thermalBagPrices = settings?.thermalBagPrices ?? getRuntimeThermalBagPrices()
   if (!isRecord(draft) || !Number.isSafeInteger(draft.coveredCupCount) || !(draft.coveredCupCount in thermalBagPrices)) {
     return fail('INVALID_THERMAL_BAG', 'A thermal bag must explicitly cover 1, 2, 3, or 4 cups')
   }
@@ -133,7 +136,7 @@ function priceThermalBag(draft: ThermalBagDraft): ThermalBag {
  * Calculates catalog pricing from product and modifier selections only.
  * Any caller-provided total or price fields on the draft are intentionally ignored.
  */
-export function priceOrder(draft: OrderDraft): PricedOrder {
+export function priceOrder(draft: OrderDraft, settings?: PricingCatalogSnapshot): PricedOrder {
   if (!isRecord(draft) || !Array.isArray(draft.items)) {
     fail('UNKNOWN_PRODUCT', 'Order draft must include an items array')
   }
@@ -151,8 +154,11 @@ export function priceOrder(draft: OrderDraft): PricedOrder {
     }
   }
 
-  const items = draft.items.map(priceItem)
-  const thermalBags = (draft.thermalBags ?? []).map(priceThermalBag)
+  const catalog = settings
+    ? Object.fromEntries(Object.entries(PRODUCT_CATALOG).filter(([slug]) => settings.productAvailability[slug as ProductSlug]).map(([slug, product]) => [slug, { ...product, basePriceCentavos: settings.productBasePrices[slug as ProductSlug] }])) as Readonly<Record<ProductSlug, MenuProduct>>
+    : getRuntimeCatalog()
+  const items = draft.items.map((item) => priceItem(item, catalog, settings))
+  const thermalBags = (draft.thermalBags ?? []).map((bag) => priceThermalBag(bag, settings))
   const itemCupCount = items.reduce((count, item) => count + item.quantity, 0)
   const coveredCupCount = thermalBags.reduce((count, bag) => count + bag.coveredCupCount, 0)
 

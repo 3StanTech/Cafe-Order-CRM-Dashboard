@@ -3,7 +3,7 @@ import { handler as netlifyHandler } from '../../../../netlify/functions/parse-o
 import vercelHandler from '../../../../api/parse-orders'
 import { DASHBOARD_AUTH_EMAIL } from '../../../../server/dashboard-auth-email'
 import {
-  ANTHROPIC_TIMEOUT_MS,
+  OPENROUTER_TIMEOUT_MS,
   extractOrders,
   MAX_RAW_BODY_BYTES,
   MAX_RAW_TEXT_CHARS,
@@ -38,7 +38,8 @@ function authHeaders(token?: string): Record<string, string> {
 }
 
 function configuredEnv() {
-  vi.stubEnv('ANTHROPIC_API_KEY', 'test-key')
+  vi.stubEnv('OPENROUTER_API_KEY', 'test-key')
+  vi.stubEnv('OPENROUTER_MODEL', 'provider/model:free')
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co')
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'test-anon-key')
 }
@@ -56,9 +57,9 @@ function invalidUser() {
 }
 
 const sampleStructure = {
-  content: [{
-    type: 'text',
-    text: '{"orders":[{"customer_name":"Mika","items":[{"product_slug":"matcha-latte","quantity":1,"level":1,"powder":"yumeno","sweetness":null}],"thermal_bags":[],"delivery_date":null,"address":"Makati","notes":null,"source_confidence":0.9,"unresolved_fields":[]}]}',
+  choices: [{
+    finish_reason: 'stop',
+    message: { role: 'assistant', content: '{"orders":[{"customer_name":"Mika","items":[{"product_slug":"matcha-latte","quantity":1,"level":1,"powder":"yumeno","sweetness":null,"cup_names":[]}],"thermal_bags":[],"delivery_date":null,"address":"Makati","notes":null,"source_confidence":0.9,"unresolved_fields":[]}]}' },
   }],
 }
 
@@ -70,7 +71,8 @@ describe('dashboard owner email lockstep', () => {
 
 describe('parse-orders Netlify function authorization', () => {
   it('fails closed when Supabase server config is missing', async () => {
-    vi.stubEnv('ANTHROPIC_API_KEY', 'test-key')
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-key')
+    vi.stubEnv('OPENROUTER_MODEL', 'provider/model:free')
     vi.stubEnv('VITE_SUPABASE_URL', '')
     vi.stubEnv('VITE_SUPABASE_ANON_KEY', '')
     const fetchMock = vi.fn()
@@ -142,10 +144,10 @@ describe('parse-orders Netlify function authorization', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('returns a clear configuration error and makes no upstream call without the Anthropic key', async () => {
+  it('returns a clear configuration error and makes no upstream call without the OpenRouter key', async () => {
     configuredEnv()
     ownerUser()
-    vi.stubEnv('ANTHROPIC_API_KEY', '')
+    vi.stubEnv('OPENROUTER_API_KEY', '')
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     const response = await netlifyHandler({
@@ -158,7 +160,7 @@ describe('parse-orders Netlify function authorization', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('sends the structural schema to Haiku and returns the model structure unchanged for local normalization', async () => {
+  it('sends the structural schema to a pinned free OpenRouter model and returns validated structure', async () => {
     configuredEnv()
     ownerUser()
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(sampleStructure), { status: 200 }))
@@ -170,16 +172,18 @@ describe('parse-orders Netlify function authorization', () => {
     } as never, {} as never)
     expect(response).toMatchObject({ statusCode: 200 })
     const request = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(request.model).toBe('claude-haiku-4-5')
-    expect(request.max_tokens).toBe(1400)
+    expect(request.model).toBe('provider/model:free')
+    expect(request.max_tokens).toBe(2400)
     expect(request.messages[0].content).toContain('unresolved_fields')
     expect(request.messages[0].content).not.toMatch(/price|total/i)
+    expect(request.response_format).toEqual({ type: 'json_object' })
+    expect(request.provider).toMatchObject({ data_collection: 'deny', sort: 'latency', require_parameters: true })
   })
 
   it('does not emit Access-Control-Allow-Origin', async () => {
     configuredEnv()
     ownerUser()
-    vi.stubEnv('ANTHROPIC_API_KEY', '')
+    vi.stubEnv('OPENROUTER_API_KEY', '')
     const response = await netlifyHandler({
       httpMethod: 'POST',
       headers: authHeaders(OWNER_TOKEN),
@@ -241,7 +245,7 @@ describe('parse-orders Vercel adapter authorization', () => {
     expect(fetchMock).toHaveBeenCalled()
   })
 
-  it('rejects Content-Length over the limit without calling Anthropic', async () => {
+  it('rejects Content-Length over the limit without calling OpenRouter', async () => {
     configuredEnv()
     ownerUser()
     const fetchMock = vi.fn()
@@ -279,7 +283,7 @@ describe('extractOrders bounds', () => {
     expect((result.body as { error: string }).error).toMatch(/maximum length/i)
   })
 
-  it('aborts a hung Anthropic fetch after the timeout and returns 504', async () => {
+  it('aborts a hung OpenRouter fetch after the timeout and returns 504', async () => {
     vi.useFakeTimers()
     try {
       const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
@@ -290,8 +294,9 @@ describe('extractOrders bounds', () => {
         })
       }))
       vi.stubGlobal('fetch', fetchMock)
+      vi.stubEnv('OPENROUTER_MODEL', 'provider/model:free')
       const pending = extractOrders(JSON.stringify({ raw_text: 'Mika: one matcha' }), 'test-key')
-      await vi.advanceTimersByTimeAsync(ANTHROPIC_TIMEOUT_MS)
+      await vi.advanceTimersByTimeAsync(OPENROUTER_TIMEOUT_MS)
       const result = await pending
       expect(result).toMatchObject({ status: 504 })
       expect((result.body as { error: string }).error).toMatch(/timed out/i)
@@ -300,11 +305,71 @@ describe('extractOrders bounds', () => {
     }
   })
 
-  it('preserves the 1,400 output-token cap on successful requests', async () => {
+  it('preserves the bounded 2,400 output-token cap on successful requests', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(sampleStructure), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('OPENROUTER_MODEL', 'provider/model:free')
     await extractOrders(JSON.stringify({ raw_text: 'Mika: one matcha' }), 'test-key')
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(body.max_tokens).toBe(1400)
+    expect(body.max_tokens).toBe(2400)
+  })
+
+  it('rejects a missing or non-stop finish reason as incomplete', async () => {
+    for (const finishReason of [undefined, 'length']) {
+      const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        choices: [{ ...(finishReason ? { finish_reason: finishReason } : {}), message: { content: sampleStructure.choices[0].message.content } }],
+      }), { status: 200 }))
+      vi.stubGlobal('fetch', fetchMock)
+      vi.stubEnv('OPENROUTER_MODEL', 'provider/model:free')
+      const result = await extractOrders(JSON.stringify({ raw_text: 'Mika: one matcha' }), 'test-key')
+      expect(result).toMatchObject({ status: 502 })
+      expect((result.body as { error: string }).error).toMatch(/incomplete/i)
+    }
+  })
+
+  it('rejects provider error and refusal envelopes even when they include text', async () => {
+    for (const payload of [
+      { error: { message: 'quota' }, choices: [{ finish_reason: 'stop', message: { content: sampleStructure.choices[0].message.content } }] },
+      { choices: [{ finish_reason: 'stop', refusal: 'cannot comply', message: { content: sampleStructure.choices[0].message.content } }] },
+      { choices: [{ finish_reason: 'stop', message: { refusal: 'cannot comply', content: sampleStructure.choices[0].message.content } }] },
+    ]) {
+      const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }))
+      vi.stubGlobal('fetch', fetchMock)
+      vi.stubEnv('OPENROUTER_MODEL', 'provider/model:free')
+      const result = await extractOrders(JSON.stringify({ raw_text: 'Mika: one matcha' }), 'test-key')
+      expect(result).toMatchObject({ status: 502 })
+    }
+  })
+
+  it('accepts optional null error and refusal fields when the response is complete', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: null,
+      choices: [{ finish_reason: 'stop', refusal: null, message: { refusal: null, content: sampleStructure.choices[0].message.content } }],
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('OPENROUTER_MODEL', 'provider/model:free')
+    expect(await extractOrders(JSON.stringify({ raw_text: 'Mika: one matcha' }), 'test-key')).toMatchObject({ status: 200 })
+  })
+
+  it('rejects structurally invalid scalar values and impossible dates', async () => {
+    const invalid = JSON.parse(sampleStructure.choices[0].message.content)
+    invalid.orders[0].delivery_date = 'tomorrow'
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(invalid) } }],
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('OPENROUTER_MODEL', 'provider/model:free')
+    const result = await extractOrders(JSON.stringify({ raw_text: 'Mika: one matcha' }), 'test-key')
+    expect(result).toMatchObject({ status: 502 })
+  })
+
+  it('fails closed for an absent or paid OpenRouter model before making an upstream call', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('OPENROUTER_MODEL', '')
+    expect(await extractOrders(JSON.stringify({ raw_text: 'Mika: one matcha' }), 'test-key')).toMatchObject({ status: 503 })
+    vi.stubEnv('OPENROUTER_MODEL', 'provider/model')
+    expect(await extractOrders(JSON.stringify({ raw_text: 'Mika: one matcha' }), 'test-key')).toMatchObject({ status: 503 })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

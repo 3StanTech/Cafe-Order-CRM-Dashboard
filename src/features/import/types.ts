@@ -20,6 +20,7 @@ export type ImportDraft = {
   id: string
   rawSource: string
   customerName: string | null
+  customerPhone?: string | null
   matchedCustomerId: string | null
   items: ImportItem[]
   thermalBags: ImportThermalBag[]
@@ -29,6 +30,11 @@ export type ImportDraft = {
   sourceConfidence: number | null
   unresolvedFields: string[]
   sameAsLastTime: boolean
+  /** Stable key used by the storage transaction across refreshes/retries. */
+  confirmationKey?: string
+  /** Hash of the last attempted logical payload for the stable key. */
+  confirmationRequestHash?: string
+  confirmationAttemptedAt?: number
 }
 
 export type StructuralItem = {
@@ -42,6 +48,7 @@ export type StructuralItem = {
 
 export type StructuralOrder = {
   customer_name?: unknown
+  customer_phone?: unknown
   items?: unknown
   thermal_bags?: unknown
   delivery_date?: unknown

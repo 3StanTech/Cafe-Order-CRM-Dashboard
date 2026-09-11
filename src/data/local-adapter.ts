@@ -1,16 +1,67 @@
 import { openDB, type IDBPDatabase } from 'idb'
 import { demoCustomers, demoModifierGroups, demoOrderItems, demoOrders, demoProducts, demoSettings } from '../demo/seed'
-import type { Setting, StorageAdapter, StorageChange, StorageCollection, StorageEntityByCollection, StorageUnsubscribe, StoredCustomer, StoredModifierGroup, StoredOrder, StoredOrderItem, StoredProduct } from './types'
+import type { OrderConfirmationInput, Setting, StorageAdapter, StorageChange, StorageCollection, StorageEntityByCollection, StorageUnsubscribe, StoredCustomer, StoredModifierGroup, StoredOrder, StoredOrderItem, StoredProduct } from './types'
 
 type LocalRecord = StoredProduct | StoredModifierGroup | StoredCustomer | StoredOrder | StoredOrderItem | Setting
 type StoreName = StorageCollection
+type ConfirmationRecord = { confirmationKey: string; requestHash: string; orderId: string; createdAt: string }
 
 const databaseName = 'made-by-angela-order-dashboard'
 const stores: StoreName[] = ['products', 'modifierGroups', 'customers', 'orders', 'orderItems', 'settings']
 const memoryStores = new Map<StoreName, Map<string, LocalRecord>>()
+const confirmationStore = 'confirmationKeys'
+const memoryConfirmationKeys = new Map<string, ConfirmationRecord>()
+let confirmationQueue: Promise<void> = Promise.resolve()
 
 function timestamp(): string { return new Date().toISOString() }
 function clone<T>(value: T): T { return structuredClone(value) }
+function normalizeCustomerName(name: string): string {
+  return name.trim().toLocaleLowerCase('en-PH').replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ')
+}
+function normalizedPhone(phone: string | null): string { return phone?.replace(/\D/g, '') ?? '' }
+
+function resolveLocalCustomer(
+  customers: readonly StoredCustomer[],
+  input: OrderConfirmationInput,
+): { customer: StoredCustomer; customerChange: 'insert' | 'update' | null } {
+  const requestedName = input.customer.name.trim()
+  if (!requestedName) throw new Error('Customer name is required for confirmation.')
+  let customer = input.customer.id ? customers.find((candidate) => candidate.id === input.customer.id) : undefined
+  if (input.customer.id && !customer) throw new Error('The selected customer no longer exists.')
+
+  if (!customer) {
+    const matches = customers.filter((candidate) => normalizeCustomerName(candidate.name) === normalizeCustomerName(requestedName))
+    if (matches.length === 1) customer = matches[0]
+    else if (matches.length > 1) {
+      const phone = normalizedPhone(input.customer.phone)
+      const phoneMatches = phone ? matches.filter((candidate) => normalizedPhone(candidate.phone) === phone) : []
+      if (phoneMatches.length !== 1) throw new Error('Multiple saved customers share this name; resolve the customer before confirming.')
+      customer = phoneMatches[0]
+    }
+  }
+
+  if (!customer) {
+    const createdAt = input.order.createdAt || timestamp()
+    return {
+      customer: { id: crypto.randomUUID(), name: requestedName, phone: input.customer.phone, createdAt, updatedAt: createdAt },
+      customerChange: 'insert',
+    }
+  }
+
+  const requestedPhone = normalizedPhone(input.customer.phone)
+  const savedPhone = normalizedPhone(customer.phone)
+  if (savedPhone && requestedPhone && savedPhone !== requestedPhone) {
+    throw new Error('The saved customer has a different contact number; resolve the customer before confirming.')
+  }
+  const nextCustomer = {
+    ...customer,
+    name: requestedName,
+    phone: customer.phone ?? input.customer.phone,
+    updatedAt: timestamp(),
+  }
+  const changed = nextCustomer.name !== customer.name || nextCustomer.phone !== customer.phone
+  return { customer: nextCustomer, customerChange: changed ? 'update' : null }
+}
 
 /**
  * Mirrors `public.set_order_lifecycle_timestamps()` in `supabase/schema.sql`.
@@ -68,8 +119,11 @@ export class LocalAdapter implements StorageAdapter {
   }
 
   static async create(): Promise<LocalAdapter> {
-    const database = typeof indexedDB === 'undefined' ? null : await openDB(databaseName, 1, {
-      upgrade(db) { for (const store of stores) if (!db.objectStoreNames.contains(store)) db.createObjectStore(store, { keyPath: 'id' }) },
+    const database = typeof indexedDB === 'undefined' ? null : await openDB(databaseName, 2, {
+      upgrade(db) {
+        for (const store of stores) if (!db.objectStoreNames.contains(store)) db.createObjectStore(store, { keyPath: 'id' })
+        if (!db.objectStoreNames.contains(confirmationStore)) db.createObjectStore(confirmationStore, { keyPath: 'confirmationKey' })
+      },
     })
     const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(databaseName)
     const adapter = new LocalAdapter(database, channel)
@@ -175,6 +229,112 @@ export class LocalAdapter implements StorageAdapter {
     const lifecycle = applyOrderLifecycleTimestamps(order, null)
     return this.put('orders', { ...order, ...lifecycle })
   }
+
+  /**
+   * Local parity for the production confirmation RPC. IndexedDB uses one
+   * readwrite transaction across every affected store, so a failed operation
+   * cannot leave a customer, order, item, or retry key half-written. The memory
+   * fallback stages all values before committing them under a process-wide
+   * queue, which keeps the test adapter's observable behavior equivalent.
+   */
+  async confirmOrderWithResolution(input: OrderConfirmationInput): Promise<StoredOrder> {
+    const run = confirmationQueue.then(async () => {
+      if (!/^[A-Za-z0-9._:-]{16,100}$/.test(input.confirmationKey) || !/^[0-9a-f]{64}$/i.test(input.requestHash)) {
+        throw new Error('A valid durable confirmation key and request hash are required.')
+      }
+      if (this.database) return this.confirmOrderInDatabase(input)
+      return this.confirmOrderInMemory(input)
+    })
+    confirmationQueue = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  private async confirmOrderInDatabase(input: OrderConfirmationInput): Promise<StoredOrder> {
+    const transaction = this.database!.transaction([...stores, confirmationStore], 'readwrite')
+    const confirmations = transaction.objectStore(confirmationStore)
+    const existingKey = await confirmations.get(input.confirmationKey) as ConfirmationRecord | undefined
+    if (existingKey) {
+      if (existingKey.requestHash !== input.requestHash) throw new Error('Confirmation key was already used for another payload.')
+      const existingOrder = await transaction.objectStore('orders').get(existingKey.orderId) as StoredOrder | undefined
+      if (!existingOrder) throw new Error('Confirmation key points to a deleted order.')
+      const existingItems = await transaction.objectStore('orderItems').getAll() as StoredOrderItem[]
+      await transaction.done
+      return { ...clone(existingOrder), items: existingItems.filter((item) => item.orderId === existingOrder.id).map(clone) }
+    }
+
+    const customerStore = transaction.objectStore('customers')
+    const customers = await customerStore.getAll() as StoredCustomer[]
+    const { customer, customerChange } = resolveLocalCustomer(customers, input)
+    if (customerChange) customerStore.put(customer)
+    const orderId = crypto.randomUUID()
+    const createdAt = input.order.createdAt || timestamp()
+    const updatedAt = timestamp()
+    const items = input.order.items.map((item) => ({ ...item, id: crypto.randomUUID(), orderId, createdAt: updatedAt, updatedAt }))
+    const candidate: StoredOrder = {
+      ...input.order,
+      id: orderId,
+      customerId: customer.id,
+      status: 'new',
+      paymentReceived: false,
+      paidAt: null,
+      deliveredAt: null,
+      items,
+      createdAt,
+      updatedAt,
+    }
+    const saved = { ...candidate, ...applyOrderLifecycleTimestamps(candidate, null) }
+    transaction.objectStore('orders').put(saved)
+    for (const item of items) transaction.objectStore('orderItems').put(item)
+    transaction.objectStore(confirmationStore).put({ confirmationKey: input.confirmationKey, requestHash: input.requestHash, orderId, createdAt: updatedAt } satisfies ConfirmationRecord)
+    await transaction.done
+    if (customerChange) this.emit({ collection: 'customers', operation: customerChange, entity: customer })
+    for (const item of items) this.emit({ collection: 'orderItems', operation: 'insert', entity: item })
+    this.emit({ collection: 'orders', operation: 'insert', entity: saved })
+    return clone(saved)
+  }
+
+  private async confirmOrderInMemory(input: OrderConfirmationInput): Promise<StoredOrder> {
+    const existingKey = memoryConfirmationKeys.get(input.confirmationKey)
+    if (existingKey) {
+      if (existingKey.requestHash !== input.requestHash) throw new Error('Confirmation key was already used for another payload.')
+      const existingOrder = await this.getOrder(existingKey.orderId)
+      if (!existingOrder) throw new Error('Confirmation key points to a deleted order.')
+      return existingOrder
+    }
+    const customers = await this.listCustomers()
+    const { customer, customerChange } = resolveLocalCustomer(customers, input)
+    const orderId = crypto.randomUUID()
+    const createdAt = input.order.createdAt || timestamp()
+    const updatedAt = timestamp()
+    const items = input.order.items.map((item) => ({ ...item, id: crypto.randomUUID(), orderId, createdAt: updatedAt, updatedAt }))
+    const candidate: StoredOrder = {
+      ...input.order,
+      id: orderId,
+      customerId: customer.id,
+      status: 'new',
+      paymentReceived: false,
+      paidAt: null,
+      deliveredAt: null,
+      items,
+      createdAt,
+      updatedAt,
+    }
+    const saved = { ...candidate, ...applyOrderLifecycleTimestamps(candidate, null) }
+    const customerStore = memoryStores.get('customers') ?? new Map<string, LocalRecord>()
+    const orderStore = memoryStores.get('orders') ?? new Map<string, LocalRecord>()
+    const itemStore = memoryStores.get('orderItems') ?? new Map<string, LocalRecord>()
+    if (customerChange) customerStore.set(customer.id, clone(customer))
+    orderStore.set(saved.id, clone(saved))
+    for (const item of items) itemStore.set(item.id, clone(item))
+    memoryStores.set('customers', customerStore)
+    memoryStores.set('orders', orderStore)
+    memoryStores.set('orderItems', itemStore)
+    memoryConfirmationKeys.set(input.confirmationKey, { confirmationKey: input.confirmationKey, requestHash: input.requestHash, orderId, createdAt: updatedAt })
+    if (customerChange) this.emit({ collection: 'customers', operation: customerChange, entity: customer })
+    for (const item of items) this.emit({ collection: 'orderItems', operation: 'insert', entity: item })
+    this.emit({ collection: 'orders', operation: 'insert', entity: saved })
+    return clone(saved)
+  }
   async updateOrder(id: string, patch: Partial<Omit<StoredOrder, 'id' | 'createdAt'>>): Promise<StoredOrder> {
     const current = await this.get('orders', id)
     if (!current) throw new Error(`orders record ${id} does not exist.`)
@@ -219,4 +379,10 @@ export class LocalAdapter implements StorageAdapter {
   }
 }
 
-export function resetLocalAdapterMemoryForTests(): void { memoryStores.clear() }
+function timestampNow(): string { return new Date().toISOString() }
+
+export function resetLocalAdapterMemoryForTests(): void {
+  memoryStores.clear()
+  memoryConfirmationKeys.clear()
+  confirmationQueue = Promise.resolve()
+}

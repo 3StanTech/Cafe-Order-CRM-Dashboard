@@ -64,6 +64,7 @@ export function normalizeCandidate(candidate: StructuralOrder, rawSource: string
   return {
     id: id(), rawSource,
     customerName: stringOrNull(candidate.customer_name),
+    customerPhone: stringOrNull(candidate.customer_phone),
     matchedCustomerId: null,
     items: importedItems,
     thermalBags: bags,

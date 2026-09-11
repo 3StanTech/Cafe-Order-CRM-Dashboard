@@ -53,6 +53,29 @@ export type StoredOrder = Omit<Order, 'items'> & {
   deliveredAt: string | null
 }
 
+/**
+ * The customer resolution supplied to the atomic confirmation operation.  A
+ * missing id means the server must resolve or create the customer in the same
+ * transaction as the order and its items.
+ */
+export type OrderConfirmationCustomer = {
+  id: string | null
+  name: string
+  phone: string | null
+}
+
+/**
+ * Durable, idempotent order creation input.  The confirmation key and request
+ * hash are persisted by Supabase (and mirrored by LocalAdapter) before a retry
+ * can create another customer or order.
+ */
+export type OrderConfirmationInput = {
+  order: StoredOrder
+  customer: OrderConfirmationCustomer
+  confirmationKey: string
+  requestHash: string
+}
+
 export type Setting = {
   id: string
   key: string
@@ -125,6 +148,12 @@ export interface StorageAdapter {
   listOrders(filter?: { deliveryDate?: string }): Promise<StoredOrder[]>
   getOrder(id: string): Promise<StoredOrder | null>
   createOrder(order: StoredOrder): Promise<StoredOrder>
+  /**
+   * Atomically resolves the customer, creates the order/items, and records a
+   * durable retry key.  SupabaseAdapter requires the hand-applied confirmation
+   * RPC; it must not fall back to separate writes.
+   */
+  confirmOrderWithResolution?(input: OrderConfirmationInput): Promise<StoredOrder>
   updateOrder(id: string, patch: Partial<Omit<StoredOrder, 'id' | 'createdAt'>>): Promise<StoredOrder>
   deleteOrder(id: string): Promise<void>
 
