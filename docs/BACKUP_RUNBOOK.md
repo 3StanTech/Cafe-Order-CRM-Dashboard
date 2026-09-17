@@ -2,7 +2,7 @@
 
 How to back up and restore the cafe order dashboard database. Written for a non-technical operator. No secrets belong in this file or in the git repo.
 
-**Live app:** https://bubu-tracker.netlify.app/  
+**Live app:** https://bubu-cafe.netlify.app/  
 **Supabase project ref:** `ybmrdsnqquryrdiqglng` (free tier; RLS on all tables)
 
 **Tables (restore-safe order — parents before children):**
@@ -214,7 +214,7 @@ Run this **before** applying any versioned SQL file from `supabase/migrations/` 
 3. [ ] Verify the backup (section 5) — especially `products` = 6 and non-empty `orders` / `order_items` if you had production traffic.
 4. [ ] Note the migration filename you will apply and keep it open side by side with this checklist.
 5. [ ] Prefer applying migrations only when you can stay at the computer until verification finishes.
-6. [ ] After the migration: spot-check Table Editor row counts, try loading the live app (https://bubu-tracker.netlify.app/), and confirm a sample order still looks correct.
+6. [ ] After the migration: spot-check Table Editor row counts, try loading the live app (https://bubu-cafe.netlify.app/), and confirm a sample order still looks correct.
 7. [ ] If anything looks wrong: **stop**, do not run further SQL, and restore from the backup you just made (section 4).
 
 Migrations in this project are applied **manually**; this checklist is not automated.

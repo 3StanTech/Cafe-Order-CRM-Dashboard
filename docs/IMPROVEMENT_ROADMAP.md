@@ -1,5 +1,7 @@
 # Gelly Dashboard Improvement Roadmap
 
+**Status (2026-09-11): complete.** Phases 1–4 shipped (lint/CI/e2e, bundle split, lifecycle timestamps, Sentry). Do not restart this document. Current state lives in the project `master.md`. Cafe intake activation is a separate checklist: `Gelly_Production_Activation_Guide.docx`.
+
 **Prepared:** 2026-07-28
 
 **Purpose:** Decision-complete session transfer for the approved “Do immediately” and “Do later” improvements.
