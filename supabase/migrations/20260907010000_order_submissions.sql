@@ -1,13 +1,13 @@
--- Pending public order intake. Apply manually after reviewing the existing
--- owner-RLS migration; this file is intentionally additive and does not touch
--- existing operational rows.
+-- Pending public order intake. Apply after the fresh base schema and owner Auth
+-- identity have been verified. This migration is intentionally additive and
+-- does not touch existing operational rows.
 
 begin;
 
 do $$
 begin
   if to_regprocedure('public.dashboard_owner_uid()') is null then
-    raise exception 'Prerequisite missing: apply the owner-RLS migration before order submissions';
+    raise exception 'Prerequisite missing: apply the base owner-RLS schema before order submissions';
   end if;
 end;
 $$;

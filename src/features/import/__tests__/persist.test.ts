@@ -90,4 +90,3 @@ describe('import confirmation', () => {
     await adapter.close()
   })
 })
-

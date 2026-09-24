@@ -1,3 +1,5 @@
+begin;
+
 create extension if not exists pgcrypto;
 
 create type public.order_status as enum (
@@ -154,6 +156,15 @@ alter table public.orders enable row level security;
 alter table public.order_items enable row level security;
 alter table public.settings enable row level security;
 
+-- This project disables automatic Data API grants for newly created tables.
+-- RLS still limits these authenticated privileges to the dashboard owner.
+grant usage on schema public to authenticated;
+revoke all on public.products, public.modifier_groups, public.customers,
+  public.orders, public.order_items, public.settings from public, anon, authenticated;
+grant select, insert, update, delete on public.products, public.customers,
+  public.orders, public.order_items, public.settings to authenticated;
+-- modifier_groups is dormant; retain the table without granting app access.
+
 create or replace function public.dashboard_owner_uid()
 returns uuid
 language sql
@@ -163,7 +174,7 @@ set search_path = auth, public
 as $$
   select id
   from auth.users
-  where email = 'angela@madebyangela.local'
+  where email = 'acosta.angelatherese@gmail.com'
   limit 1
 $$;
 
@@ -329,3 +340,5 @@ alter publication supabase_realtime add table public.customers;
 alter publication supabase_realtime add table public.orders;
 alter publication supabase_realtime add table public.order_items;
 alter publication supabase_realtime add table public.settings;
+
+commit;

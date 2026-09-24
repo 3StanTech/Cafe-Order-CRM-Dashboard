@@ -37,56 +37,8 @@ function withSessionToken(token: string | null) {
 const validLocalOrder = '{"customer_name":"Mika","items":[{"product_slug":"matcha-latte","quantity":1}],"address":"Makati"}'
 const secondLocalOrder = '{"customer_name":"Aira","items":[{"product_slug":"strawberry-hojicha","quantity":2}],"address":"Quezon City"}'
 
-describe('ImportWorkspace transport selection', () => {
-  it('keeps valid JSON entirely local and sends only free text to the Netlify endpoint with a bearer token', async () => {
-    resetLocalAdapterMemoryForTests()
-    const adapter = await LocalAdapter.create()
-    const user = userEvent.setup()
-    withSessionToken('session-token-abc')
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ orders: [{ customer_name: 'Mika', items: [{ product_slug: 'matcha-latte', quantity: 1 }], address: 'Makati' }] }), { status: 200 }))
-    vi.stubGlobal('fetch', fetchMock)
-    render(<ImportWorkspace adapter={adapter} />)
-    const input = screen.getByRole('textbox', { name: 'Paste Viber orders' })
-    fireEvent.change(input, { target: { value: validLocalOrder } })
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(await screen.findByText('1 draft ready')).toBeInTheDocument()
-    expect(screen.queryByText('Editable order draft')).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Edit' }))
-    expect(await screen.findByText('Editable order draft')).toBeInTheDocument()
-    fireEvent.change(input, { target: { value: '' } })
-    await user.type(input, 'Mika: one matcha latte, Makati')
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      '/.netlify/functions/parse-orders',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          'Content-Type': 'application/json',
-          Authorization: 'Bearer session-token-abc',
-        }),
-      }),
-    ))
-    await adapter.close()
-  })
-
-  it('fails visibly without calling the extraction endpoint when there is no session', async () => {
-    resetLocalAdapterMemoryForTests()
-    const adapter = await LocalAdapter.create()
-    const user = userEvent.setup()
-    withSessionToken(null)
-    const fetchMock = vi.fn()
-    vi.stubGlobal('fetch', fetchMock)
-    render(<ImportWorkspace adapter={adapter} />)
-    const input = screen.getByRole('textbox', { name: 'Paste Viber orders' })
-    fireEvent.change(input, { target: { value: 'Mika: one matcha latte, Makati' } })
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
-    expect(await screen.findByRole('status')).toHaveTextContent(/sign in is required/i)
-    expect(fetchMock).not.toHaveBeenCalled()
-    await adapter.close()
-  })
-
-  it('fails visibly without calling extraction when auth is unavailable (demo mode)', async () => {
+describe('ImportWorkspace local JSON intake', () => {
+  it('keeps JSON local and blocks Viber text without calling the extraction endpoint', async () => {
     resetLocalAdapterMemoryForTests()
     const adapter = await LocalAdapter.create()
     const user = userEvent.setup()
@@ -94,11 +46,20 @@ describe('ImportWorkspace transport selection', () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     render(<ImportWorkspace adapter={adapter} />)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Paste Viber orders' }), {
-      target: { value: 'Mika: one matcha latte, Makati' },
-    })
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
-    expect(await screen.findByRole('status')).toHaveTextContent(/sign in is required/i)
+    const input = screen.getByRole('textbox', { name: 'Paste order JSON or JSON Lines' })
+    expect(screen.getByText(/Viber text extraction is unavailable in this release/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /ChatGPT/i })).not.toBeInTheDocument()
+    fireEvent.change(input, { target: { value: validLocalOrder } })
+    await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await screen.findByText('1 draft ready')).toBeInTheDocument()
+    expect(screen.queryByText('Editable order draft')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(await screen.findByText('Editable order draft')).toBeInTheDocument()
+    fireEvent.change(input, { target: { value: 'Mika: one matcha latte, Makati' } })
+    await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(/Viber text extraction is unavailable.*Paste order JSON or JSON Lines/i)
+    expect(screen.getByText('1 draft ready')).toBeInTheDocument()
     expect(fetchMock).not.toHaveBeenCalled()
     await adapter.close()
   })
@@ -114,10 +75,10 @@ describe('ImportWorkspace batch confirm, recovery, and duplicates', () => {
     vi.stubGlobal('fetch', fetchMock)
     const before = await adapter.listOrders()
     render(<ImportWorkspace adapter={adapter} />)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Paste Viber orders' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Paste order JSON or JSON Lines' }), {
       target: { value: `[${validLocalOrder},${secondLocalOrder}]` },
     })
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
+    await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
     expect(await screen.findByText('2 drafts ready')).toBeInTheDocument()
     expect(screen.queryByText('No delivery date')).not.toBeInTheDocument()
     expect(screen.queryByText('Editable order draft')).not.toBeInTheDocument()
@@ -137,10 +98,10 @@ describe('ImportWorkspace batch confirm, recovery, and duplicates', () => {
     const user = userEvent.setup()
     withSessionToken('session-token-abc')
     render(<ImportWorkspace adapter={adapter} />)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Paste Viber orders' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Paste order JSON or JSON Lines' }), {
       target: { value: validLocalOrder },
     })
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
+    await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
     expect(await screen.findByText('1 draft ready')).toBeInTheDocument()
     expect(screen.queryByText('Editable order draft')).not.toBeInTheDocument()
     await waitFor(() => {
@@ -159,11 +120,11 @@ describe('ImportWorkspace batch confirm, recovery, and duplicates', () => {
     const user = userEvent.setup()
     withSessionToken('session-token-abc')
     render(<ImportWorkspace adapter={adapter} />)
-    const input = screen.getByRole('textbox', { name: 'Paste Viber orders' })
+    const input = screen.getByRole('textbox', { name: 'Paste order JSON or JSON Lines' })
     fireEvent.change(input, { target: { value: validLocalOrder } })
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
+    await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
     expect(await screen.findByText('1 draft ready')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
+    await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
     expect(await screen.findByText('2 drafts ready')).toBeInTheDocument()
     expect(screen.getAllByText(/probable duplicate/i)).toHaveLength(2)
     expect(screen.queryByText('Editable order draft')).not.toBeInTheDocument()
@@ -180,10 +141,10 @@ describe('ImportWorkspace batch confirm, recovery, and duplicates', () => {
     const user = userEvent.setup()
     withSessionToken('session-token-abc')
     const firstRender = render(<ImportWorkspace adapter={adapter} />)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Paste Viber orders' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Paste order JSON or JSON Lines' }), {
       target: { value: validLocalOrder },
     })
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
+    await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
     expect(await screen.findByText('1 draft ready')).toBeInTheDocument()
     await waitFor(() => {
       expect(localStorage.getItem(getImportRecoveryStorageKey(DASHBOARD_AUTH_EMAIL))).toBeTruthy()
@@ -204,10 +165,10 @@ describe('ImportWorkspace batch confirm, recovery, and duplicates', () => {
     const user = userEvent.setup()
     withSessionToken('session-token-abc')
     render(<ImportWorkspace adapter={adapter} />)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Paste Viber orders' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Paste order JSON or JSON Lines' }), {
       target: { value: validLocalOrder },
     })
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
+    await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
     expect(await screen.findByText('1 draft ready')).toBeInTheDocument()
     const key = getImportRecoveryStorageKey(DASHBOARD_AUTH_EMAIL)
     await waitFor(() => expect(localStorage.getItem(key)).toBeTruthy())
@@ -223,10 +184,10 @@ describe('ImportWorkspace batch confirm, recovery, and duplicates', () => {
     const user = userEvent.setup()
     withSessionToken('session-token-abc')
     render(<ImportWorkspace adapter={adapter} />)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Paste Viber orders' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Paste order JSON or JSON Lines' }), {
       target: { value: validLocalOrder },
     })
-    await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
+    await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
     expect(await screen.findByText('1 draft ready')).toBeInTheDocument()
     const key = getImportRecoveryStorageKey(DASHBOARD_AUTH_EMAIL)
     await waitFor(() => expect(localStorage.getItem(key)).toBeTruthy())

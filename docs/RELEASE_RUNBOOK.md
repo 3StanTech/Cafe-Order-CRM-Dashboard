@@ -1,156 +1,47 @@
 # Release runbook
 
-Followable release procedure for the order dashboard. Invents no commands. Apply migrations only by hand in the Supabase SQL Editor — never from CI, never from a script in this repo.
+Production site: `https://bubu-cafe.netlify.app/`. Supabase project: `rcyhthbbexzsvtpjyptj`. Netlify site: `bubu-cafe`. The fresh base schema and one-time owner rebind are applied; the hardened fresh check returned 40/40 true. Production serves Release 1 `main` at `8a90627f` as Netlify deploy `6ab3aa65d51bd800089e10e3`. On 2026-09-24, the owner signed in, loaded Today/Orders/Customers/Settings, retained the session after reload, and saved/restored a safe Settings change across reloads. Five anonymous table reads returned 401. Read-only checks of the Settings JSON report non-empty `businessContact` and `gCashNumber` fields; their values were not read. Authenticated non-owner denial remains unverified. The latest read-only baseline is products 0, customers 0, orders 0, order_items 0, settings 1, modifier_groups 0; `order_submissions` is absent and the owner UID matches the expected account. A fresh private backup must preserve the existing Settings row before Release 2 migration. SQL check output is not production acceptance.
 
-**No secret ever enters CI.** Netlify holds environment variables for the deployed app. GitHub Actions holds none; the `quality` workflow needs zero repository secrets.
+The assistant may apply reviewed production SQL after explicit authorization for that write. Do not place SQL deployment in CI or enable Supabase GitHub production deployment for this rollout. Credentials, Netlify changes, Git publication, and deploys have their own authorization gates. Never put secrets in `VITE_*`, GitHub Actions, chat, or committed files. The quality workflow runs without secrets.
 
-**Public `/order` and OpenRouter Viber extraction are not live** until the manual activation steps below are finished. Shipping this branch, or merging it, does not turn them on.
+## Release 1: connected owner dashboard
 
----
+Database steps already done on `rcyhthbbexzsvtpjyptj`. Do not repeat them.
 
-## Public order and OpenRouter (not live until manual activation)
+- `supabase/schema.sql` is already applied. It is the fresh base: owner-bound RLS, aggregate RPCs, explicit grants on the active tables, and no app grants on dormant `modifier_groups`.
+- The confirmed Auth user `acosta.angelatherese@gmail.com`, UID `df339f22-d142-44d1-98fd-570cd8b29f7c`, already exists. The owner privately set a numeric PIN; never record it. New Auth signups are disabled; email sign-in remains enabled.
+- `supabase/migrations/20260923010000_rebind_dashboard_owner.sql` is already applied. That file is the reproducible UID pin for a future empty project: after `supabase/schema.sql` and after that same confirmed Auth user exists, it checks the email and UID, then replaces `dashboard_owner_uid()`. Do not run it again on this project.
+- Do not run `supabase/migrations/20260828010000_owner_rls_and_aggregate_rpcs.sql` on this project or on a future fresh project. It binds `angela@madebyangela.local`. Its policy work already lives in `supabase/schema.sql`; the rebind file is what pins the Gmail UID.
+- After the rebind, the earlier `supabase/checks/03_fresh_project.sql` returned 35/35 true. The hardened version then returned 40/40 true on the live project, including owner identity and policy shape. It still does not require `modifier_groups` to have app policies. The exported result is in the outside-Git release evidence.
 
-Do not treat customer `/order` or OpenRouter paste extraction as production behavior after a deploy. Both fail closed without host secrets and applied schema. Complete these only after a backup, in a maintenance window, and only when you intend to activate them.
+Remaining Release 1 work:
 
-### Public order submissions
+1. Keep `main` at the published `8a90627f` foundation while the remaining non-owner access check is completed. Do not promote the rest of the intake branch for Release 1.
+2. The Gmail owner-email patch and the two public Supabase variables are already published in deploy `6ab3aa65d51bd800089e10e3`. Do not repeat those operations. Do not copy the variables to Deploy Previews, branch deploys, or `netlify.toml`. Values in `netlify.toml` override the UI and are not available to Functions.
+   - `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are public connection values, not the service-role secret. The client build needs them, and the Functions read the same names from `process.env`. On Pro and Enterprise, where the UI can limit scopes, select **Builds** and **Functions**. Builds alone leaves the functions without configuration. Functions alone leaves the Vite bundle in demo mode. Do not select **Runtime** (forms and signed proxy redirects) or **Post processing** (snippet injection) for these keys.
+   - Leave `SUPABASE_SERVICE_ROLE_KEY`, `OPENROUTER_API_KEY`, and `OPENROUTER_MODEL` unset until Release 2. On a plan whose UI has no scope selector, a variable applies to every scope; that is a plan limit, not a reason to prefix a secret with `VITE_` or to put it in the build.
+3. Owner sign-in and safe Settings persistence have been verified. Complete an authenticated non-owner denial check before accepting the owner access boundary. Do not create a secondary production account solely for this check without separate authorization.
+4. The latest read-only checks confirmed non-empty `businessContact` and `gCashNumber` values in the persisted Settings JSON; persistence is established without recording the values. Check the `products` registry after legitimate catalog backfill; no fake sale is needed. The five anonymous table reads already returned 401.
+5. Record the final deploy ID, commit, 40/40 SQL result, and rollback target outside Git. If the live app fails, roll back the Netlify configuration and deploy while preserving the database for diagnosis. Do not begin Release 2 until this live owner path is accepted.
 
-Still off until all of the following are true:
+## Release 2: pending orders and local JSON intake
 
-1. Verify the owner-RLS prerequisite in production. In the Supabase SQL Editor, run `select public.dashboard_owner_uid();`. If it returns Angela’s uuid, continue. If it fails (function missing), take a backup, then hand-apply `supabase/migrations/20260828010000_owner_rls_and_aggregate_rpcs.sql` in a maintenance window. Do not assume this migration is already live.
-2. Only after that query succeeds, hand-apply the additive pending-inbox migration `supabase/migrations/20260907010000_order_submissions.sql` in the Supabase SQL Editor, in its own transaction. It refuses to apply if `dashboard_owner_uid()` is missing. Never apply it from CI.
-3. Netlify (or the equivalent host) has server-only `SUPABASE_SERVICE_ROLE_KEY`. Never put that value in `VITE_*`, GitHub Actions, or client source. The public page talks only to `/.netlify/functions/order-submissions`.
-4. The host adapters (`netlify/functions/order-submissions.ts` and `api/order-submissions.ts`) are part of the deploy. They still fail closed without the service-role secret and the applied submissions migration.
+For this release, the user selected the public order form and local JSON paste with AI extraction disabled. The live free-model benchmark did not produce a qualifying model. Do not configure `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, or a fallback for Release 2; keep the free-text AI control unavailable. Qualify and activate a free parser in a later release.
 
-Until those steps are done, `/order` must not be shared as a working customer link. A local Vite demo without functions also fails closed; that is not a production menu.
+1. Pause intake changes during a short maintenance window. Re-run and save the read-only `supabase/checks/01_baseline.sql` and `03_fresh_project.sql` results immediately before migration; compare counts rather than requiring `initial_operational_rows_empty`, which is already false because the Settings table has one row. Follow [the backup runbook](BACKUP_RUNBOOK.md) to export and verify the current data, including that Settings row, before the additive migration.
+2. Review `supabase/migrations/20260907010000_order_submissions.sql` against the live base schema. After production schema-write authorization, apply it once to this project. Its transaction and prerequisite must complete successfully. Run `supabase/checks/04_submissions.sql` and require every `passed` value true, including the anon and authenticated write denials and the owner/service EXECUTE split, and require zero pending rows. Never rerun a partially applied migration blindly. Do not replay the old owner migration or the already-applied rebind.
+3. Keep the OpenRouter qualification gate closed for this release. No candidate qualified, and the user selected local JSON paste with Viber text extraction disabled; qualifying a parser is not a Release 2 prerequisite. For a later parser release, require a pinned `:free` id, advertised JSON support (`response_format` or `structured_outputs`), numeric zero prompt and completion prices, all essential fields across all 12 fixtures, and a median below 10 seconds. Reject automatic routes and any paid or non-zero-price model. `OPENROUTER_BENCHMARK_MODELS` accepts a shortlist of at most three live-listed IDs; without it, selection is deterministic by advertised JSON support and context length. Save benchmark results outside Git. Keep all OpenRouter variables unset for Release 2.
+4. Recheck the exact feature-branch diff, `npm run check`, GitHub quality CI, and the 220 KiB initial-route gzip budget. The published code must retain `priceOrder()` as the price authority, owner bearer checks, and server-only public submission writes.
+5. After authorization for the Netlify secret, set Production-context `SUPABASE_SERVICE_ROLE_KEY` in the UI, CLI, or API, not in `netlify.toml`. On Pro and Enterprise, limit it to the **Functions** scope. Do not give it the Builds scope. Keep `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` on Production with both **Builds** and **Functions**, as in Release 1. **Runtime** and **Post processing** are the wrong scopes. On the free plan, the UI has no scope selector and variables apply to every scope: still omit secrets from `VITE_*` and `netlify.toml`. Leave all OpenRouter variables unset for this release.
+6. Complete local checks and primary review, then commit and push the current feature branch under the owner's existing publication authorization. Verify GitHub quality CI against the exact pushed SHA. Feature-branch publication does not apply SQL or publish to `main`. Keep merge/deployment separate: before promoting to `main`, require the submissions migration and `04_submissions.sql` checks, the private backup, the separately authorized service-role secret, and explicit production deployment authorization. A qualifying parser is not required because extraction stays disabled. Netlify publishes from `main`; verify the new deploy ID and commit after an authorized deployment.
+7. Before sharing `/order`, run a controlled customer submission in a clean signed-out browser. Check quote, idempotency, pending inbox, owner edit/reprice, accept as New unpaid, separate Mark Paid, and reject. Check invalid/oversized input, rate limiting, anonymous/non-owner denial, and no browser-exposed service key. Verify Viber AI extraction is unavailable and local JSON paste works without a provider call. Record test-row cleanup and results outside Git.
+8. If the function or parser fails, stop sharing `/order` and roll back to the accepted Release 1 deploy or disable the affected secret-backed route while diagnosing. Do not claim the release complete from offline tests alone.
 
-### OpenRouter Viber extraction
+## General quality and recovery
 
-Still off until all of the following are true:
-
-1. Netlify has `OPENROUTER_API_KEY` (server-only).
-2. `OPENROUTER_MODEL` is a pinned id ending in `:free`, chosen after `npx --no-install jiti scripts/openrouter-benchmark.ts`. Do not invent a model id and do not use paid models or `openrouter/auto`.
-3. Optional `OPENROUTER_FALLBACK_MODEL` is also a different pinned `:free` id, or omitted.
-4. The existing authenticated `/.netlify/functions/parse-orders` deploy is serving the OpenRouter core.
-
-Until those env vars are set, paste extraction returns HTTP 503 with a configuration message and makes no upstream call. A missing key is unresolved readiness, not a qualified free model.
-
----
-
-## Preconditions (every release)
-
-- A backup is taken **before any migration**. Follow [docs/BACKUP_RUNBOOK.md](BACKUP_RUNBOOK.md) (manual CSV or `pg_dump` as documented there). Do not skip this step.
-- Working tree is clean and you are on the intended branch.
-
----
-
-## Fixed sequence
-
-### 1. Clean branch, clean `git status`
-
-Confirm you are on the correct branch and that `git status` shows a clean working tree (or only the intentional changes for this release).
-
-```sh
-git status
-```
-
-### 2. Local quality gate
-
-```sh
-npm run check
-```
-
-This runs, fail-fast in order:
-
-1. `npm run lint` — oxlint over `src server netlify api test e2e`. Gate is **zero errors**. The script does not pass `--deny-warnings`; the tree is currently also zero warnings.
-2. `npm test` — unit/integration tests (vitest)
-3. `npm run build` — TypeScript project build + Vite production build
-4. `npm run check:bundle` — gzipped initial `/today` transfer vs the 220 KiB budget (`scripts/check-bundle.mjs`; needs `dist/` from the previous step)
-5. `npm run test:e2e` — Playwright Chromium smoke in demo mode (`playwright.config.ts` force-blanks `VITE_SUPABASE_*` so a local `.env` cannot point the suite at production)
-
-### 3. Open (or update) the PR — `quality` must be green
-
-Push the branch and open a pull request. GitHub Actions workflow `.github/workflows/quality.yml` runs on pull requests and on pushes to `main`. Job name: **quality**.
-
-Required steps (in order): checkout → Node 20 + npm cache → `npm ci` → Playwright Chromium install → `npm run lint` → `npm test` → `npm run build` → `npm run check:bundle` → `npm run test:e2e`.
-
-Do not merge until the **quality** check is green.
-
-### 4. Maintenance window
-
-Schedule and announce a short maintenance window if the release includes a production database migration or any behavior that could disrupt operators mid-shift.
-
-### 5. Record production baseline (pre-migration)
-
-In the **Supabase SQL Editor**, run the contents of:
-
-```text
-supabase/checks/01_baseline.sql
-```
-
-Paste the single-row result (order count, order-item count, money sums, counts-by-status JSON) into the release record / changelog entry for this release.
-
-### 6. Apply pending migration by hand
-
-Apply the pending file under `supabase/migrations/` **by hand in the Supabase SQL Editor**, inside **its own transaction** (the migration file should begin with `begin;` and end with `commit;`, or wrap the body yourself).
-
-The next unapplied production migration is `supabase/migrations/20260828010000_owner_rls_and_aggregate_rpcs.sql` (owner-bound RLS + aggregate RPCs). Confirm `select public.dashboard_owner_uid();` returns Angela’s uuid after apply. The shipped app falls back to the old multi-request path until this file has been applied, so production keeps working either way.
-
-Public pending-inbox tables are a later additive file, `supabase/migrations/20260907010000_order_submissions.sql`. Do not apply it in the same breath as an unrelated frontend-only release, and do not treat `/order` as live merely because the file exists in git. See **Public order and OpenRouter** above.
-
-- Never apply migrations from CI.
-- Never apply migrations from a script in this repository.
-- If anything fails before `commit`, roll back the transaction (see Rollback below).
-
-### 7. Post-migration checks
-
-In the Supabase SQL Editor, run again:
-
-```text
-supabase/checks/01_baseline.sql
-supabase/checks/02_schema.sql
-```
-
-Compare invariants against the pre-migration record from step 5. Counts and money sums must match **exactly**, except where the migration intentionally changes them (document any intentional delta in the release record). Schema checks must show expected enum labels, required columns/constraints, and zero lifecycle-consistency violations (`orders_status_payment_inconsistent_count = 0`).
-
-### 8. Merge / push `main`
-
-Merge the PR (or push to `main` per your branching practice). Netlify auto-deploys from `main`.
-
-### 9. Verify the deploy
-
-1. Verify the deployed Netlify asset hash **byte-for-byte** against the local `npm run build` output (same method used for the last three releases). This comparison is only valid when the local build’s `VITE_SUPABASE_*` values (and optional `VITE_SENTRY_*`, if set in production) match Netlify production. A CI or blank-env build is **not** the production byte image — do not use it for the hash check.
-2. Verify the PIN shell loads and accepts operator auth as expected.
-3. Verify `/manifest.webmanifest` is served.
-4. Verify `/sw.js` is served.
-5. Open a clean browser console (hard refresh if needed) and confirm no unexpected errors.
-
-### 10. Record the release
-
-Record commit SHA, check results, baseline invariants (pre and post), and any intentional schema deltas in the project changelog.
-
----
-
-## Rollback
-
-- **Before a migration commits:** rollback is the SQL transaction rollback (`rollback;` in the Supabase SQL Editor). Do not leave a half-applied migration.
-- **After a migration commits:** recovery is a **new forward migration** only. Never perform an ad-hoc manual rewrite of production data to “undo” a committed migration.
-
----
-
-## Ordering rule
-
-Frontend code that **requires** a schema change must not reach `main` before the compatible production migration is applied. Ship and apply the migration first (or in the same maintenance window before the frontend that depends on it is live), then promote the frontend.
-
----
-
-## What CI does and does not do
-
-| Does | Does not |
-|------|----------|
-| `npm run lint` | Apply database migrations |
-| `npm test` | Hold or use repository secrets |
-| `npm run build` | Deploy to production |
-| `npm run check:bundle` | |
-| Playwright E2E smoke (`npm run test:e2e`, demo mode) | |
-
-Environment variables for the live app live in **Netlify**, not in GitHub Actions.
+- `npm run check` runs lint, Vitest, server TypeScript, build, bundle budget, and five Playwright demo-mode scenarios. Playwright blanks Supabase variables; it does not validate production Supabase.
+- GitHub Actions quality CI runs without production secrets. A green check does not apply SQL or deploy the database.
+- Before SQL commits, a transaction error should roll back. After a committed migration, use a reviewed forward correction or a verified backup/restore procedure; never improvise live row edits.
+- Record the production baseline and every post-migration check. Operational counts and centavo sums must match unless the release intentionally adds controlled test rows, which must be identified and handled.
+- `manifest.webmanifest`, `sw.js`, mobile navigation, owner PIN, and Netlify Functions need live checks after each applicable deploy. A local build with blank `VITE_*` values is not byte-identical to the production build.
+- Keep Sentry's first real event and the next genuine four-cup order as postrelease follow-ups. Do not create a fake customer sale for those checks. Vercel remains a contingency, not part of this rollout.

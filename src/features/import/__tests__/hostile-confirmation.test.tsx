@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LocalAdapter, resetLocalAdapterMemoryForTests } from '../../../data/local-adapter'
 import { ImportWorkspace } from '../ImportWorkspace'
-import { duplicatePastedJsonLines, splitCustomerStructuralResponse, splitCustomerThread, unsafeText } from '../../../../test/fixtures/import/hostile/hostile-import-fixtures'
+import { duplicatePastedJsonLines, unsafeText } from '../../../../test/fixtures/import/hostile/hostile-import-fixtures'
 
 const getSessionMock = vi.fn()
 const getAuthClientMock = vi.fn()
@@ -26,13 +26,13 @@ async function renderWorkspace() {
 }
 
 async function pasteAndParse(user: ReturnType<typeof userEvent.setup>, value: string) {
-  const input = screen.getByRole('textbox', { name: 'Paste Viber orders' })
+  const input = screen.getByRole('textbox', { name: 'Paste order JSON or JSON Lines' })
   await act(async () => {
     fireEvent.change(input, { target: { value } })
   })
-  await user.click(screen.getByRole('button', { name: 'Create editable drafts' }))
+  await user.click(screen.getByRole('button', { name: 'Create drafts from JSON' }))
   await waitFor(() => {
-    expect(screen.getByRole('button', { name: 'Create editable drafts' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Create drafts from JSON' })).toBeEnabled()
   })
 }
 
@@ -54,19 +54,17 @@ afterEach(() => {
 })
 
 describe('T6 hostile import transport, rendering, and confirmation audit', () => {
-  it('stubs free-text extraction deterministically, keeps the split customer in one draft, and independently reprices it', async () => {
+  it('blocks free-text Viber extraction without making a network request', async () => {
     const adapter = await renderWorkspace()
     const user = userEvent.setup()
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(splitCustomerStructuralResponse), { status: 200 }))
+    const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
-    await pasteAndParse(user, splitCustomerThread)
-    await expandFirstDraft(user)
+    await pasteAndParse(user, 'Mika: one matcha latte, Makati')
 
-    expect(fetchMock).toHaveBeenCalledOnce()
-    expect(await screen.findByRole('textbox', { name: 'Customer name' })).toHaveValue('Paolo Reyes')
-    expect(screen.getByText('₱640.00')).toBeInTheDocument()
-    expect(screen.getByText('Parsed through the extraction service. Review every field before confirming.')).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await screen.findByRole('status')).toHaveTextContent(/Viber text extraction is unavailable.*Paste order JSON or JSON Lines/i)
+    expect(screen.queryByText(/drafts? ready/)).not.toBeInTheDocument()
     await adapter.close()
   })
 
@@ -86,43 +84,23 @@ describe('T6 hostile import transport, rendering, and confirmation audit', () =>
   it('renders untrusted structural name, address, and notes as text rather than executable HTML', async () => {
     const adapter = await renderWorkspace()
     const user = userEvent.setup()
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ orders: [{
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await pasteAndParse(user, JSON.stringify({
       customer_name: unsafeText,
       items: [{ product_slug: 'matcha-latte', quantity: 1 }],
       address: unsafeText,
       notes: unsafeText,
-    }] }), { status: 200 }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    await pasteAndParse(user, 'Please parse this free text')
+    }))
     await expandFirstDraft(user)
 
+    expect(fetchMock).not.toHaveBeenCalled()
     expect(await screen.findByRole('textbox', { name: 'Customer name' })).toHaveValue(unsafeText)
     expect(screen.getByRole('textbox', { name: 'Address' })).toHaveValue(unsafeText)
     expect(screen.getByRole('textbox', { name: 'Notes' })).toHaveValue(unsafeText)
     expect(document.querySelector('script')).toBeNull()
     expect(document.querySelector('img')).toBeNull()
     expect((globalThis as typeof globalThis & { __hostileXss?: unknown }).__hostileXss).toBeUndefined()
-    await adapter.close()
-  })
-
-  it('shows a visible failure for a function HTTP error, invalid function JSON, and aborted request', async () => {
-    const adapter = await renderWorkspace()
-    const user = userEvent.setup()
-    const fetchMock = vi.fn()
-    vi.stubGlobal('fetch', fetchMock)
-
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Extraction unavailable' }), { status: 503 }))
-    await pasteAndParse(user, 'first prose request')
-    expect(await screen.findByText('Extraction unavailable')).toBeInTheDocument()
-
-    fetchMock.mockResolvedValueOnce(new Response('not JSON', { status: 200 }))
-    await pasteAndParse(user, 'second prose request')
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/unexpected token|json/i))
-
-    fetchMock.mockRejectedValueOnce(new DOMException('The operation was aborted.', 'AbortError'))
-    await pasteAndParse(user, 'third prose request')
-    expect(await screen.findByRole('status')).toHaveTextContent(/aborted|extraction service failed/i)
     await adapter.close()
   })
 
@@ -152,7 +130,7 @@ describe('T6 hostile import transport, rendering, and confirmation audit', () =>
     await adapter.close()
   })
 
-  it('does not turn a duplicate pasted comment into two independently confirmable orders', async () => {
+  it('does not turn duplicate pasted JSON Lines into two independently confirmable orders', async () => {
     const adapter = await renderWorkspace()
     const user = userEvent.setup()
     const before = await adapter.listOrders()

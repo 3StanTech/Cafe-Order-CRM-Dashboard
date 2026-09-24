@@ -1,6 +1,5 @@
-import { Clipboard, LoaderCircle } from 'lucide-react'
+import { LoaderCircle } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { getRuntimeCatalog } from '../../domain/catalog'
 import { getNextAvailableDeliveryDate } from '../../domain/delivery-schedule'
 import type { StorageAdapter, StoredCustomer, StoredOrder } from '../../data/types'
 import { GELLY_AUTH_SIGNED_OUT_EVENT } from '../auth/AuthBoundary'
@@ -17,9 +16,8 @@ import {
 } from './draft-recovery'
 import { draftHasBlockingErrors, duplicateDraftIds, summarizeDraftItems } from './draft-summary'
 import { PendingInbox } from './PendingInbox'
-import { normalizeFunctionResponse, parseLocalInput, validateDraft } from './parser'
+import { parseLocalInput, validateDraft } from './parser'
 import { confirmImportDraft } from './persist'
-import { buildViberChatGptPrompt } from './prompt'
 import type { ImportDraft } from './types'
 
 type ImportWorkspaceProps = { adapter: StorageAdapter }
@@ -47,7 +45,6 @@ export function ImportWorkspace({ adapter }: ImportWorkspaceProps) {
   const [customers, setCustomers] = useState<StoredCustomer[]>([])
   const [orders, setOrders] = useState<StoredOrder[]>([])
   const [message, setMessage] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [batchConfirming, setBatchConfirming] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -171,52 +168,16 @@ export function ImportWorkspace({ adapter }: ImportWorkspaceProps) {
   const parse = async () => {
     setMessage(null)
     const local = parseLocalInput(rawText)
-    if (local.kind === 'empty') { setMessage('Paste an order conversation, JSON object, or JSON Lines first.'); return }
+    if (local.kind === 'empty') { setMessage('Paste an order JSON object, array, or JSON Lines first.'); return }
+    if (local.kind === 'free-text') {
+      setMessage('Viber text extraction is unavailable in this release. Paste order JSON or JSON Lines instead.')
+      return
+    }
     if (local.kind === 'local') {
       const decorated = await decorateIncoming(local.drafts)
       appendDrafts(decorated)
       setMessage('Parsed locally — no network request was made.')
-      return
     }
-
-    const authClient = getAuthClient()
-    if (!authClient) {
-      setMessage('Sign in is required to use the extraction service.')
-      return
-    }
-    let accessToken: string | undefined
-    try {
-      const { data } = await authClient.auth.getSession()
-      accessToken = data.session?.access_token
-    } catch {
-      accessToken = undefined
-    }
-    if (!accessToken) {
-      setMessage('Sign in is required to use the extraction service.')
-      return
-    }
-
-    setLoading(true)
-    try {
-      const response = await fetch('/.netlify/functions/parse-orders', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({ raw_text: rawText }),
-      })
-      const body: unknown = await response.json()
-      if (!response.ok) throw new Error(typeof body === 'object' && body !== null && 'error' in body ? String(body.error) : 'The extraction service failed')
-      const decorated = await decorateIncoming(normalizeFunctionResponse(body, rawText))
-      appendDrafts(decorated)
-      setMessage('Parsed through the extraction service. Review every field before confirming.')
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'The extraction service failed') } finally { setLoading(false) }
-  }
-
-  const copyPrompt = async () => {
-    await navigator.clipboard.writeText(buildViberChatGptPrompt(getRuntimeCatalog()))
-    setMessage('The @ChatGPT-in-Viber extraction prompt is copied.')
   }
 
   const persistPrepared = (prepared: ImportDraft) => {
@@ -338,36 +299,29 @@ export function ImportWorkspace({ adapter }: ImportWorkspaceProps) {
             <span className="rounded-full bg-[#4F74C8] px-2.5 py-1 text-xs font-bold text-white">{pendingCount} pending</span>
           )}
         </div>
-        <p className="mt-1 text-base font-semibold text-[#20242f]">Import Viber orders</p>
+        <p className="mt-1 text-base font-semibold text-[#20242f]">Import orders</p>
         <p className="mt-1 max-w-xl text-sm leading-6 text-[#4A5365]">Paste, review, confirm.</p>
       </header>
 
       <div className="rounded-2xl border border-[#4F74C8]/20 bg-[#FFFDF6] p-4 shadow-sm">
         <FieldLabel>
-          Paste Viber orders
+          Paste order JSON or JSON Lines
           <textarea
-            aria-label="Paste Viber orders"
+            aria-label="Paste order JSON or JSON Lines"
+            aria-describedby="import-json-help"
             value={rawText}
             onChange={(event) => setRawText(event.target.value)}
-            placeholder={'Mika: 1 matcha latte L2\nAira: 2 strawberry hojicha\nBen: same as last time'}
+            placeholder={'{"customer_name":"Mika","items":[{"product_slug":"matcha-latte","quantity":1}],"address":"Makati"}'}
             className="mt-1 min-h-44 w-full rounded-xl border border-[#4F74C8]/25 bg-white p-3 text-sm outline-none transition-colors focus:border-[#4F74C8] focus:ring-2 focus:ring-[#4F74C8]/20"
           />
         </FieldLabel>
+        <p id="import-json-help" className="mt-2 text-sm leading-5 text-[#4A5365]">Paste JSON or JSON Lines. Viber text extraction is unavailable in this release. Drafts are parsed on this device; confirming one saves it to the dashboard.</p>
         <button
           type="button"
-          disabled={loading}
           onClick={() => parse()}
-          className="mt-3 flex min-h-12 w-full items-center justify-center rounded-xl bg-[#4F74C8] px-4 font-bold text-white shadow-sm transition duration-200 hover:bg-[#365AA9] active:scale-[0.98] motion-safe:transition-transform disabled:opacity-50 disabled:active:scale-100"
+          className="mt-3 flex min-h-12 w-full items-center justify-center rounded-xl bg-[#4F74C8] px-4 font-bold text-white shadow-sm transition duration-200 hover:bg-[#365AA9] active:scale-[0.98] motion-safe:transition-transform"
         >
-          {loading && <LoaderCircle className="mr-2 motion-safe:animate-spin" size={17} />}
-          {loading ? 'Extracting structure…' : 'Create editable drafts'}
-        </button>
-        <button
-          type="button"
-          onClick={() => void copyPrompt()}
-          className="mt-2 flex min-h-11 w-full items-center justify-center rounded-xl border border-[#4F74C8]/30 px-4 text-sm font-bold text-[#365aa8] transition-colors duration-200 hover:bg-[#4F74C8]/10 active:scale-[0.98] motion-safe:transition-transform"
-        >
-          <Clipboard className="mr-2" size={16} />Copy @ChatGPT-in-Viber prompt
+          Create drafts from JSON
         </button>
       </div>
 

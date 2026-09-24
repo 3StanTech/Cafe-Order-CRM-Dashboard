@@ -2,9 +2,10 @@
  * Offline-safe OpenRouter free-model qualification harness.
  *
  * Does nothing billed unless OPENROUTER_API_KEY is set in the environment.
- * Never prints the key. Never selects paid models or openrouter/auto.
+ * Never prints the key. Never selects paid models, non-zero prices, or openrouter/auto.
  *
- *   npx --no-install jiti scripts/openrouter-benchmark.ts [--out path]
+ *   OPENROUTER_BENCHMARK_MODELS=provider/one:free,provider/two:free \
+ *     npx --no-install jiti scripts/openrouter-benchmark.ts [--out path]
  *
  * Output path: --out / positional CLI arg, else OPENROUTER_BENCHMARK_OUT, else
  * os.tmpdir()/openrouter-benchmark.json.
@@ -61,7 +62,9 @@ export type BenchmarkFile = {
 export type OpenRouterModel = {
   id?: unknown
   supported_parameters?: unknown
+  context_length?: unknown
   architecture?: { output_modalities?: unknown }
+  pricing?: { prompt?: unknown; completion?: unknown } | null
 }
 
 export type ProviderExtraction =
@@ -185,13 +188,38 @@ export function essentialFieldsPass(parsed: unknown, fixture: BenchmarkFixture):
   return remaining.length === 0
 }
 
+function isZeroPrice(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value) && value === 0
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (!/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)) return false
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) && parsed === 0
+}
+
+export function hasZeroPromptAndCompletionPrice(model: OpenRouterModel): boolean {
+  const pricing = model.pricing
+  if (!pricing || typeof pricing !== 'object') return false
+  return isZeroPrice(pricing.prompt) && isZeroPrice(pricing.completion)
+}
+
 export function isJsonCapableFree(model: OpenRouterModel): string | null {
   if (typeof model.id !== 'string' || !isPinnedFreeModelId(model.id)) return null
+  if (!hasZeroPromptAndCompletionPrice(model)) return null
   const parameters = Array.isArray(model.supported_parameters)
     ? model.supported_parameters.filter((value): value is string => typeof value === 'string')
     : []
   const jsonCapable = parameters.includes('response_format') || parameters.includes('structured_outputs')
   return jsonCapable ? model.id : null
+}
+
+export function parseModelShortlist(value: string | undefined): string[] | { error: string } {
+  if (!value?.trim()) return []
+  const models = value.split(',').map((id) => id.trim())
+  if (models.length > MAX_CANDIDATES || models.some((id) => !isPinnedFreeModelId(id)) || new Set(models).size !== models.length) {
+    return { error: `Benchmark shortlist must contain one to ${MAX_CANDIDATES} distinct pinned :free model IDs.` }
+  }
+  return models
 }
 
 export function acceptProviderExtraction(payload: unknown): ProviderExtraction {
@@ -210,7 +238,10 @@ export function acceptProviderExtraction(payload: unknown): ProviderExtraction {
   return { ok: true, parsed }
 }
 
-export async function listFreeJsonCandidates(apiKey: string): Promise<string[] | { error: string }> {
+export async function listFreeJsonCandidates(apiKey: string, shortlist: readonly string[] = []): Promise<string[] | { error: string }> {
+  if (shortlist.length > MAX_CANDIDATES || new Set(shortlist).size !== shortlist.length || shortlist.some((id) => !isPinnedFreeModelId(id))) {
+    return { error: `Benchmark shortlist must contain at most ${MAX_CANDIDATES} distinct pinned :free model IDs.` }
+  }
   const response = await fetch(OPENROUTER_MODELS_URL, {
     headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
   })
@@ -226,14 +257,31 @@ export async function listFreeJsonCandidates(apiKey: string): Promise<string[] |
   const rows = payload && typeof payload === 'object' && Array.isArray((payload as { data?: unknown }).data)
     ? (payload as { data: OpenRouterModel[] }).data
     : []
-  const selected: string[] = []
+  const eligible = new Map<string, OpenRouterModel>()
   for (const row of rows) {
     const id = isJsonCapableFree(row)
     if (!id) continue
-    selected.push(id)
-    if (selected.length >= MAX_CANDIDATES) break
+    eligible.set(id, row)
   }
-  return selected
+  if (shortlist.length > 0) {
+    const missing = shortlist.find((id) => !eligible.has(id))
+    if (missing) return { error: `Benchmark shortlist model ${missing} is not live-listed with JSON support as a pinned :free ID with zero prompt and completion price.` }
+    return [...shortlist]
+  }
+  return [...eligible.entries()]
+    .sort(([aId, a], [bId, b]) => {
+      const capabilityScore = (model: OpenRouterModel): number => {
+        const parameters = Array.isArray(model.supported_parameters) ? model.supported_parameters : []
+        return Number(parameters.includes('response_format')) + Number(parameters.includes('structured_outputs'))
+      }
+      const capabilityDifference = capabilityScore(b) - capabilityScore(a)
+      if (capabilityDifference) return capabilityDifference
+      const aContext = typeof a.context_length === 'number' ? a.context_length : 0
+      const bContext = typeof b.context_length === 'number' ? b.context_length : 0
+      return bContext - aContext || aId.localeCompare(bId)
+    })
+    .slice(0, MAX_CANDIDATES)
+    .map(([id]) => id)
 }
 
 export async function runConversation(apiKey: string, model: string, fixture: BenchmarkFixture): Promise<CandidateRun> {
@@ -312,7 +360,14 @@ export async function runBenchmark(argv = process.argv): Promise<BenchmarkFile> 
     return payload
   }
 
-  const listed = await listFreeJsonCandidates(apiKey)
+  const shortlist = parseModelShortlist(env('OPENROUTER_BENCHMARK_MODELS'))
+  if (!Array.isArray(shortlist)) {
+    const payload = unresolved(shortlist.error, { keyPresent: true })
+    writeResult(payload, outputPath)
+    report(payload, outputPath)
+    return payload
+  }
+  const listed = await listFreeJsonCandidates(apiKey, shortlist)
   if (!Array.isArray(listed)) {
     const payload = unresolved(listed.error, { keyPresent: true, networkCalled: true })
     writeResult(payload, outputPath)
@@ -320,7 +375,7 @@ export async function runBenchmark(argv = process.argv): Promise<BenchmarkFile> 
     return payload
   }
   if (listed.length === 0) {
-    const payload = unresolved('No currently listed JSON-capable :free models passed the pin check. Paid and auto routing were not used.', {
+    const payload = unresolved('No currently listed JSON-capable :free models with zero prompt and completion price passed the pin check. Paid and auto routing were not used.', {
       keyPresent: true,
       networkCalled: true,
     })
@@ -333,7 +388,11 @@ export async function runBenchmark(argv = process.argv): Promise<BenchmarkFile> 
   for (const model of listed) {
     if (!isPinnedFreeModelId(model)) continue
     for (const fixture of fixtures) {
-      results.push(await runConversation(apiKey, model, fixture))
+      const result = await runConversation(apiKey, model, fixture)
+      results.push(result)
+      // One failed fixture disqualifies this model; preserve the free quota for
+      // candidates that can still pass all twelve cases.
+      if (!result.ok) break
     }
   }
 

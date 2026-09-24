@@ -10,6 +10,7 @@ import {
   listFreeJsonCandidates,
   MAX_CANDIDATES,
   openRouterBenchmarkFixtures,
+  parseModelShortlist,
   resolveOutputPath,
   runBenchmark,
   runConversation,
@@ -278,47 +279,102 @@ describe('finish_reason handling', () => {
   })
 })
 
+function zeroPrice(overrides: Record<string, unknown> = {}) {
+  return { prompt: '0', completion: '0', ...overrides }
+}
+
 describe('JSON capability', () => {
-  it('requires response_format or structured_outputs on pinned :free ids and ignores text modality', () => {
-    expect(isJsonCapableFree({ id: 'prov/a:free', architecture: { output_modalities: ['text'] } })).toBeNull()
-    expect(isJsonCapableFree({ id: 'prov/a:free', supported_parameters: ['temperature'] })).toBeNull()
-    expect(isJsonCapableFree({ id: 'prov/a:free', supported_parameters: ['response_format'] })).toBe('prov/a:free')
-    expect(isJsonCapableFree({ id: 'prov/b:free', supported_parameters: ['structured_outputs'] })).toBe('prov/b:free')
+  it('requires response_format or structured_outputs, a pinned :free id, and zero prompt and completion price', () => {
+    expect(isJsonCapableFree({ id: 'prov/a:free', pricing: zeroPrice(), architecture: { output_modalities: ['text'] } })).toBeNull()
+    expect(isJsonCapableFree({ id: 'prov/a:free', pricing: zeroPrice(), supported_parameters: ['temperature'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'prov/a:free', pricing: zeroPrice(), supported_parameters: ['response_format'] })).toBe('prov/a:free')
+    expect(isJsonCapableFree({ id: 'prov/b:free', pricing: zeroPrice(), supported_parameters: ['structured_outputs'] })).toBe('prov/b:free')
     expect(isJsonCapableFree({
       id: 'prov/c:free',
+      pricing: { prompt: 0, completion: '0.000000' },
       supported_parameters: ['response_format'],
       architecture: { output_modalities: ['text'] },
     })).toBe('prov/c:free')
-    expect(isJsonCapableFree({ id: 'anthropic/claude-3.5-sonnet', supported_parameters: ['response_format'] })).toBeNull()
-    expect(isJsonCapableFree({ id: 'openrouter/auto', supported_parameters: ['response_format'] })).toBeNull()
-    expect(isJsonCapableFree({ id: 'openrouter/auto:free', supported_parameters: ['structured_outputs'] })).toBeNull()
-    expect(isJsonCapableFree({ id: 'prov/paid', supported_parameters: ['response_format'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'prov/a:free', supported_parameters: ['response_format'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'prov/a:free', pricing: { prompt: '0' }, supported_parameters: ['response_format'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'prov/a:free', pricing: { prompt: '0', completion: '0.000001' }, supported_parameters: ['response_format'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'prov/a:free', pricing: { prompt: '1', completion: '0' }, supported_parameters: ['structured_outputs'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'prov/a:free', pricing: { prompt: 'free', completion: '0' }, supported_parameters: ['response_format'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'anthropic/claude-3.5-sonnet', pricing: zeroPrice(), supported_parameters: ['response_format'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'openrouter/auto', pricing: zeroPrice(), supported_parameters: ['response_format'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'openrouter/auto:free', pricing: zeroPrice(), supported_parameters: ['structured_outputs'] })).toBeNull()
+    expect(isJsonCapableFree({ id: 'prov/paid', pricing: zeroPrice(), supported_parameters: ['response_format'] })).toBeNull()
   })
 
-  it('lists at most three live free JSON-capable candidates and skips text-only, paid, and auto', async () => {
+  it('lists at most three live free JSON-capable candidates independent of provider order', async () => {
+    const models = [
+      { id: 'paid/model', pricing: zeroPrice(), supported_parameters: ['response_format'] },
+      { id: 'openrouter/auto:free', pricing: zeroPrice(), supported_parameters: ['response_format'] },
+      { id: 'prov/text:free', pricing: zeroPrice(), architecture: { output_modalities: ['text'] } },
+      { id: 'prov/temp:free', pricing: zeroPrice(), supported_parameters: ['temperature'] },
+      { id: 'prov/priced:free', pricing: { prompt: '0', completion: '0.000002' }, supported_parameters: ['response_format', 'structured_outputs'], context_length: 1_000_000 },
+      { id: 'prov/one:free', pricing: zeroPrice(), supported_parameters: ['response_format'] },
+      { id: 'prov/two:free', pricing: { prompt: '0.0', completion: 0 }, supported_parameters: ['structured_outputs'] },
+      { id: 'prov/three:free', pricing: zeroPrice(), supported_parameters: ['response_format', 'structured_outputs'] },
+      { id: 'prov/four:free', pricing: zeroPrice(), supported_parameters: ['response_format'] },
+    ]
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      data: [
-        { id: 'paid/model', supported_parameters: ['response_format'] },
-        { id: 'openrouter/auto:free', supported_parameters: ['response_format'] },
-        { id: 'prov/text:free', architecture: { output_modalities: ['text'] } },
-        { id: 'prov/temp:free', supported_parameters: ['temperature'] },
-        { id: 'prov/one:free', supported_parameters: ['response_format'] },
-        { id: 'prov/two:free', supported_parameters: ['structured_outputs'] },
-        { id: 'prov/three:free', supported_parameters: ['response_format', 'structured_outputs'] },
-        { id: 'prov/four:free', supported_parameters: ['response_format'] },
-      ],
+      data: models,
     }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
-    await expect(listFreeJsonCandidates('test-key')).resolves.toEqual([
-      'prov/one:free',
-      'prov/two:free',
-      'prov/three:free',
-    ])
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const expected = ['prov/three:free', 'prov/four:free', 'prov/one:free']
+    await expect(listFreeJsonCandidates('test-key')).resolves.toEqual(expected)
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data: [...models].reverse() }), { status: 200 }))
+    await expect(listFreeJsonCandidates('test-key')).resolves.toEqual(expected)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('uses only an explicit live-listed JSON-capable free shortlist', async () => {
+    const data = [
+      { id: 'prov/one:free', pricing: zeroPrice(), supported_parameters: ['response_format'] },
+      { id: 'prov/two:free', pricing: zeroPrice(), supported_parameters: ['structured_outputs'] },
+      { id: 'prov/text:free', pricing: zeroPrice(), supported_parameters: ['temperature'] },
+      { id: 'prov/priced:free', pricing: { prompt: '0', completion: '0.000002' }, supported_parameters: ['response_format'] },
+    ]
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ data }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(listFreeJsonCandidates('test-key', ['prov/two:free', 'prov/one:free'])).resolves.toEqual(['prov/two:free', 'prov/one:free'])
+    await expect(listFreeJsonCandidates('test-key', ['prov/text:free'])).resolves.toMatchObject({ error: expect.stringMatching(/not live-listed with JSON support/) })
+    await expect(listFreeJsonCandidates('test-key', ['prov/priced:free'])).resolves.toMatchObject({ error: expect.stringMatching(/zero prompt and completion price/) })
+    await expect(listFreeJsonCandidates('test-key', ['prov/missing:free'])).resolves.toMatchObject({ error: expect.stringMatching(/not live-listed/) })
+    await expect(listFreeJsonCandidates('test-key', ['paid/model'])).resolves.toMatchObject({ error: expect.stringMatching(/pinned :free/) })
+    await expect(listFreeJsonCandidates('test-key', ['prov/one:free', 'prov/one:free'])).resolves.toMatchObject({ error: expect.stringMatching(/distinct/) })
+    await expect(listFreeJsonCandidates('test-key', ['prov/one:free', 'prov/two:free', 'prov/three:free', 'prov/four:free'])).resolves.toMatchObject({ error: expect.stringMatching(/at most 3/) })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('parses a maximum-three distinct pinned free shortlist before any network call', () => {
+    expect(parseModelShortlist(undefined)).toEqual([])
+    expect(parseModelShortlist(' prov/one:free , prov/two:free ')).toEqual(['prov/one:free', 'prov/two:free'])
+    expect(parseModelShortlist('prov/one:free,prov/one:free')).toMatchObject({ error: expect.stringMatching(/distinct/) })
+    expect(parseModelShortlist('openrouter/auto:free')).toMatchObject({ error: expect.stringMatching(/pinned :free/) })
+    expect(parseModelShortlist('paid/model')).toMatchObject({ error: expect.stringMatching(/pinned :free/) })
+    expect(parseModelShortlist('prov/a:free,prov/b:free,prov/c:free,prov/d:free')).toMatchObject({ error: expect.stringMatching(/one to 3/) })
   })
 })
 
 describe('benchmark output path and offline readiness', () => {
+  it('stops a candidate after its first failed fixture to conserve free requests', async () => {
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-key')
+    vi.stubEnv('OPENROUTER_BENCHMARK_MODELS', 'prov/one:free')
+    vi.stubEnv('OPENROUTER_BENCHMARK_OUT', join(tmpdir(), `openrouter-benchmark-${Date.now()}.json`))
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'prov/one:free', pricing: { prompt: '0', completion: '0' }, supported_parameters: ['response_format'] }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'busy' } }), { status: 429 }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    const payload = await runBenchmark(['node', 'scripts/openrouter-benchmark.ts'])
+    expect(payload.status).toBe('unresolved')
+    expect(payload.results).toHaveLength(1)
+    expect(payload.results[0].error).toBe('HTTP 429')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('resolves CLI, env, or a temp default and never a personal absolute path', () => {
     vi.stubEnv('OPENROUTER_BENCHMARK_OUT', '')
     expect(resolveOutputPath([])).toBe(join(tmpdir(), 'openrouter-benchmark.json'))

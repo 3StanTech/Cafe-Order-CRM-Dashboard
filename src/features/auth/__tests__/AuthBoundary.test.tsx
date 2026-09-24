@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { getImportRecoveryStorageKey, saveImportWorkspace } from '../../import/draft-recovery'
 import { AuthBoundary, GELLY_AUTH_SIGNED_OUT_EVENT } from '../AuthBoundary'
-import type { AuthClient } from '../supabaseAuth'
+import { DASHBOARD_AUTH_EMAIL, type AuthClient } from '../supabaseAuth'
 
 type SessionState = { session: object | null }
 
@@ -94,7 +94,7 @@ describe('AuthBoundary', () => {
   })
 
   it('clears import recovery keys on sign-out even when Import is unmounted', async () => {
-    const ownerA = 'angela@madebyangela.local'
+    const ownerA = DASHBOARD_AUTH_EMAIL
     const ownerB = 'other@madebyangela.local'
     expect(saveImportWorkspace(ownerA, { rawText: 'viber paste a', drafts: [] })).toBe(true)
     expect(saveImportWorkspace(ownerB, { rawText: 'viber paste b', drafts: [] })).toBe(true)

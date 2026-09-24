@@ -51,5 +51,6 @@ playwright/.cache/
 !.env.example
 *.pem
 *.key
+Openrouter API key.md
 
 # <<< repo-hygiene <<<

@@ -2,6 +2,7 @@ import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PendingInbox } from '../PendingInbox'
+import { DASHBOARD_AUTH_EMAIL } from '../../auth/supabaseAuth'
 
 const getSessionMock = vi.fn()
 const getAuthClientMock = vi.fn()
@@ -22,7 +23,7 @@ afterEach(() => {
 
 function withOwnerSession() {
   getSessionMock.mockResolvedValue({
-    data: { session: { access_token: 'owner-token', user: { email: 'angela@madebyangela.local' } } },
+    data: { session: { access_token: 'owner-token', user: { email: DASHBOARD_AUTH_EMAIL } } },
   })
   getAuthClientMock.mockReturnValue({ auth: { getSession: getSessionMock } })
 }

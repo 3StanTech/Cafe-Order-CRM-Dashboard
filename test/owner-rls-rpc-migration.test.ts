@@ -17,6 +17,7 @@ describe('owner RLS and aggregate RPC migration', () => {
 
   it('binds policies to dashboard_owner_uid rather than any authenticated role', () => {
     expect(migration).toContain("email = 'angela@madebyangela.local'")
+    expect(schema).toContain("email = 'acosta.angelatherese@gmail.com'")
     expect(migration).toContain('auth.uid() = public.dashboard_owner_uid()')
     expect(migration).toContain('raise exception \'A public table policy still uses using (true)\'')
     expect(schema).toContain('auth.uid() = public.dashboard_owner_uid()')
