@@ -1,7 +1,8 @@
 import { Plus } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { StorageAdapter, StoredOrder } from '../../data/types'
-import { relevantDeliveryDate } from '../today/delivery-dates'
+import { getRelevantDeliveryDate } from '../../domain/delivery-schedule'
+import { useDashboardSettings } from '../settings/useDashboardSettings'
 import { OrderEditorModal } from '../order-editor/OrderEditorModal'
 import { blankImportDraft, storedOrderToImportDraft } from '../order-editor/orderDraftMapping'
 import { OrderCard } from './OrderCard'
@@ -16,6 +17,7 @@ type EditorState = { mode: 'create' } | { mode: 'edit'; order: StoredOrder }
 
 export function OrdersHistory({ adapter: providedAdapter }: OrdersHistoryProps) {
   const { adapter, customers, orders, loading, error } = useOrdersData(providedAdapter)
+  const { settings } = useDashboardSettings(adapter)
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<'all' | (typeof operationalStatuses)[number]>('all')
   const [deliveryDate, setDeliveryDate] = useState('')
@@ -99,7 +101,7 @@ export function OrdersHistory({ adapter: providedAdapter }: OrdersHistoryProps) 
           customers={customers}
           orders={orders}
           editingOrder={editorState.mode === 'edit' ? editorState.order : null}
-          initialDraft={editorState.mode === 'edit' ? storedOrderToImportDraft(editorState.order, customerFor(customers, editorState.order)?.name ?? null) : blankImportDraft(relevantDeliveryDate())}
+          initialDraft={editorState.mode === 'edit' ? storedOrderToImportDraft(editorState.order, customerFor(customers, editorState.order)?.name ?? null) : blankImportDraft(getRelevantDeliveryDate(new Date(), settings))}
           title={editorState.mode === 'edit' ? 'Edit order' : 'New order'}
           onClose={() => setEditorState(null)}
           onSaved={() => setEditorState(null)}

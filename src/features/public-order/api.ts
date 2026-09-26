@@ -41,6 +41,8 @@ export type PublicOrderMenu = {
     instructions: string
   }
   delivery: PublicOrderDelivery
+  /** Every day the customer may pick; the parser always fills it, falling back to `[delivery]`. */
+  deliveryOptions?: PublicOrderDelivery[]
   quoteRevision: string
   products: PublicOrderProduct[]
 }
@@ -83,6 +85,7 @@ export type PublicOrderReconfirmation = {
   code: 'RECONFIRM_REQUIRED'
   error: string
   delivery: PublicOrderDelivery
+  deliveryOptions: PublicOrderDelivery[]
   quoteRevision: string
   quote: {
     itemsSubtotalCentavos: number
@@ -175,6 +178,17 @@ function isDelivery(value: unknown): value is PublicOrderDelivery {
     && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.deliveryWindowEnd)
 }
 
+/** Offered days from a menu or reconfirm payload; an absent or malformed list falls back to `[delivery]`. */
+function parseDeliveryOptions(value: unknown, delivery: PublicOrderDelivery): PublicOrderDelivery[] {
+  if (!Array.isArray(value) || value.length === 0 || !value.every(isDelivery)) return [delivery]
+  const unique = new Map(value.map((option) => [option.deliveryDate, { deliveryDate: option.deliveryDate, deliveryWindowStart: option.deliveryWindowStart, deliveryWindowEnd: option.deliveryWindowEnd }]))
+  return [...unique.values()]
+}
+
+export function menuDeliveryOptions(menu: Pick<PublicOrderMenu, 'delivery' | 'deliveryOptions'>): PublicOrderDelivery[] {
+  return menu.deliveryOptions?.length ? menu.deliveryOptions : [menu.delivery]
+}
+
 function parseProduct(value: unknown): PublicOrderProduct | null {
   if (!isRecord(value)) return null
   if (!isProductSlug(value.slug) || !isString(value.name) || !isDrinkFamily(value.family) || !isProductFlavor(value.flavor) || value.milk !== 'oat_milk') return null
@@ -212,6 +226,7 @@ export function parsePublicOrderMenu(value: unknown): PublicOrderMenu | null {
     business: { name: business.name, description: business.description, contact: business.contact },
     payment: { method: 'GCash', account: payment.account, instructions: payment.instructions },
     delivery: value.delivery,
+    deliveryOptions: parseDeliveryOptions(value.deliveryOptions, value.delivery),
     quoteRevision: value.quoteRevision,
     products: products as PublicOrderProduct[],
   }
@@ -298,6 +313,7 @@ export function getReconfirmation(error: unknown): PublicOrderReconfirmation | n
     code: 'RECONFIRM_REQUIRED',
     error: payload.error,
     delivery: payload.delivery,
+    deliveryOptions: parseDeliveryOptions(payload.deliveryOptions, payload.delivery),
     quoteRevision: payload.quoteRevision,
     quote: {
       itemsSubtotalCentavos: quote.itemsSubtotalCentavos,

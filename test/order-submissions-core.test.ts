@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { getPublicOrderMenu, submitPublicOrder, updatePendingSubmission } from '../server/order-submissions-core'
 import { priceOrder } from '../src/domain'
+import { formatDeliveryDate } from '../src/domain/delivery-schedule'
 import { DEFAULT_DASHBOARD_SETTINGS, type DashboardSettings } from '../src/features/settings/settings-store'
 
 const SUBMISSION_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
@@ -238,5 +239,144 @@ describe('order submissions core', () => {
     expect(result.status).toBe(400)
     expect(result.body.error).toBe('The order form contains an unsupported field.')
     expect(inserts).toHaveLength(0)
+  })
+
+  it('rejects a smuggled deliveryOptions key on public submit', async () => {
+    const settings = settingsWith()
+    const { client, inserts } = createMockClient({ settings })
+    const priced = priceOrder({ items, thermalBags }, settings)
+    const result = await submitPublicOrder(client, JSON.stringify({
+      ...orderFields({
+        deliveryDate: '2026-09-15',
+        quoteRevision: await quoteRevisionFor(client, BEFORE_CUTOFF),
+        quotedTotalCentavos: priced.totals.totalCentavos,
+      }),
+      deliveryOptions: [{ deliveryDate: '2026-09-15', deliveryWindowStart: '08:00', deliveryWindowEnd: '09:00' }],
+    }), '198.51.100.10', BEFORE_CUTOFF)
+    expect(result.status).toBe(400)
+    expect(result.body.error).toBe('The order form contains an unsupported field.')
+    expect(inserts).toHaveLength(0)
+  })
+})
+
+function offeredDates(body: Record<string, unknown>): string[] {
+  return (body.deliveryOptions as { deliveryDate: string }[]).map((option) => option.deliveryDate)
+}
+
+async function submitFor(settings: DashboardSettings, deliveryDate: string, now: Date, quoteSettings: DashboardSettings = settings) {
+  const quote = createMockClient({ settings: quoteSettings })
+  const quoteRevision = await quoteRevisionFor(quote.client, BEFORE_CUTOFF)
+  const { client, inserts } = createMockClient({ settings })
+  const priced = priceOrder({ items, thermalBags }, settings)
+  const result = await submitPublicOrder(client, JSON.stringify(orderFields({
+    deliveryDate,
+    quoteRevision,
+    quotedTotalCentavos: priced.totals.totalCentavos,
+    idempotencyKey: `public-order-${deliveryDate}-key`,
+  })), '198.51.100.10', now)
+  return { result, inserts }
+}
+
+describe('offered delivery days', () => {
+  it('offers every open day within seven days and keeps the next day as delivery', async () => {
+    const { client } = createMockClient({ settings: settingsWith() })
+    const menu = await getPublicOrderMenu(client, BEFORE_CUTOFF)
+    expect(menu.status).toBe(200)
+    expect(offeredDates(menu.body)).toEqual(['2026-09-08', '2026-09-09', '2026-09-11'])
+    expect((menu.body.delivery as { deliveryDate: string }).deliveryDate).toBe('2026-09-08')
+  })
+
+  it.each(['2026-09-08', '2026-09-09', '2026-09-11'])('accepts the offered day %s', async (date) => {
+    const { result, inserts } = await submitFor(settingsWith(), date, BEFORE_CUTOFF)
+    expect(result.status).toBe(201)
+    expect(result.body.deliveryDate).toBe(date)
+    expect(inserts[0]?.delivery_date).toBe(date)
+  })
+
+  it.each([
+    ['a closed weekday', '2026-09-10'],
+    ['day 8', '2026-09-15'],
+    ['a past date', '2026-09-06'],
+    ['today', '2026-09-07'],
+  ])('rejects %s with the offered days', async (_label, date) => {
+    const { result, inserts } = await submitFor(settingsWith(), date, BEFORE_CUTOFF)
+    expect(result.status).toBe(409)
+    expect(result.body.code).toBe('RECONFIRM_REQUIRED')
+    expect(offeredDates(result.body)).toEqual(['2026-09-08', '2026-09-09', '2026-09-11'])
+    expect(inserts).toHaveLength(0)
+  })
+
+  it('rejects a closed date', async () => {
+    const settings = settingsWith({ closedDates: ['2026-09-09'] })
+    const { result, inserts } = await submitFor(settings, '2026-09-09', BEFORE_CUTOFF)
+    expect(result.status).toBe(409)
+    expect(result.body.code).toBe('RECONFIRM_REQUIRED')
+    expect(offeredDates(result.body)).toEqual(['2026-09-08', '2026-09-11'])
+    expect(inserts).toHaveLength(0)
+  })
+
+  it('rejects the old next-day date once the cutoff has passed', async () => {
+    const { result, inserts } = await submitFor(settingsWith(), '2026-09-08', AFTER_CUTOFF)
+    expect(result.status).toBe(409)
+    expect(result.body.code).toBe('RECONFIRM_REQUIRED')
+    expect(offeredDates(result.body)).toEqual(['2026-09-09', '2026-09-11'])
+    expect(inserts).toHaveLength(0)
+  })
+
+  it('forces a reconfirm with the new offered days when closed dates change after the quote', async () => {
+    const { result, inserts } = await submitFor(settingsWith({ closedDates: ['2026-09-11'] }), '2026-09-08', BEFORE_CUTOFF, settingsWith())
+    expect(result.status).toBe(409)
+    expect(result.body.code).toBe('RECONFIRM_REQUIRED')
+    expect(offeredDates(result.body)).toEqual(['2026-09-08', '2026-09-09'])
+    expect(inserts).toHaveLength(0)
+  })
+
+  it('pauses ordering until the next open day when closed dates cover the whole window', async () => {
+    const settings = settingsWith({ closedDates: ['2026-09-08', '2026-09-09', '2026-09-11'] })
+    const { client } = createMockClient({ settings })
+    const menu = await getPublicOrderMenu(client, BEFORE_CUTOFF)
+    expect(menu.status).toBe(503)
+    expect(menu.body.error).toBe(`Online ordering is paused until ${formatDeliveryDate('2026-09-15')}.`)
+    const { result, inserts } = await submitFor(settings, '2026-09-08', BEFORE_CUTOFF, settingsWith())
+    expect(result.status).toBe(503)
+    expect(result.body.error).toBe(`Online ordering is paused until ${formatDeliveryDate('2026-09-15')}.`)
+    expect(inserts).toHaveLength(0)
+  })
+
+  it('keeps the not-configured message when no open day exists at all', async () => {
+    const { client } = createMockClient({ settings: settingsWith({ openDays: [] }) })
+    const menu = await getPublicOrderMenu(client, BEFORE_CUTOFF)
+    expect(menu.status).toBe(503)
+    expect(menu.body.error).toBe('Online ordering is not configured yet.')
+  })
+
+  async function ownerEditTo(deliveryDate: string) {
+    const settings = settingsWith()
+    const { client, updates } = createMockClient({ settings, current: pendingRow() })
+    const priced = priceOrder({ items, thermalBags }, settings)
+    const result = await updatePendingSubmission(client, SUBMISSION_ID, JSON.stringify({
+      ...orderFields({
+        deliveryDate,
+        quoteRevision: await quoteRevisionFor(client, BEFORE_CUTOFF),
+        quotedTotalCentavos: priced.totals.totalCentavos,
+      }),
+      expectedReviewVersion: 0,
+      expectedReviewHash: REVIEW_HASH,
+    }), BEFORE_CUTOFF)
+    return { result, updates }
+  }
+
+  it('lets the owner move a pending submission to any offered day', async () => {
+    const { result, updates } = await ownerEditTo('2026-09-11')
+    expect(result.status).toBe(200)
+    expect(updates[0]?.delivery_date).toBe('2026-09-11')
+  })
+
+  it('asks the owner to reconfirm a move to a day that is not offered', async () => {
+    const { result, updates } = await ownerEditTo('2026-09-15')
+    expect(result.status).toBe(409)
+    expect(result.body.code).toBe('RECONFIRM_REQUIRED')
+    expect(offeredDates(result.body)).toEqual(['2026-09-08', '2026-09-09', '2026-09-11'])
+    expect(updates).toHaveLength(0)
   })
 })

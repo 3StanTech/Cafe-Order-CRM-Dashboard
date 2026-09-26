@@ -1,4 +1,4 @@
-import { BarChart3, FileUp, Home, Settings, ShoppingBag, Users } from 'lucide-react'
+import { BarChart3, Home, Inbox, Settings, ShoppingBag, Users } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router-dom'
 import gellyLogo from '../../assets/brand/gelly-logo-mark.png'
@@ -7,7 +7,7 @@ type NavigationItem = { label: string; path: string; icon: LucideIcon }
 
 const navigationItems: NavigationItem[] = [
   { label: 'Today', path: '/today', icon: Home },
-  { label: 'Import', path: '/import', icon: FileUp },
+  { label: 'Inbox', path: '/inbox', icon: Inbox },
   { label: 'Orders', path: '/orders', icon: ShoppingBag },
   { label: 'Customers', path: '/customers', icon: Users },
   { label: 'Insights', path: '/insights', icon: BarChart3 },

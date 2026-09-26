@@ -115,4 +115,18 @@ describe('OrderCard lifecycle timestamps', () => {
     expect(screen.getByText(`Paid ${formatLifecycleTimestamp(cancelledPaid.paidAt)}`)).toBeInTheDocument()
     expect(screen.queryByText(/^Delivered /)).not.toBeInTheDocument()
   })
+
+  it('shows Imported instead of the import-day Paid and Delivered times for a history-imported order', () => {
+    const imported = {
+      ...demoOrders[0],
+      status: 'delivered' as const,
+      rawSource: 'history-import:viber-2026-03-01-mika',
+      paidAt: '2026-09-26T08:00:00.000Z',
+      deliveredAt: '2026-09-26T08:00:01.000Z',
+    }
+    render(<OrderCard order={imported} customer={demoCustomers[0]} onAdvance={noop} onCancel={noop} />)
+    expect(screen.getByText('Imported')).toBeInTheDocument()
+    expect(screen.queryByText(/^Paid /)).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Delivered /)).not.toBeInTheDocument()
+  })
 })

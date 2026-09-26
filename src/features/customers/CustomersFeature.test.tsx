@@ -2,7 +2,8 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { BrowserRouter } from 'react-router-dom'
 import { createInsightsFixture } from '../../../test/fixtures/insights/createInsightsFixture'
-import { relevantDeliveryDate } from '../today/delivery-dates'
+import { getRelevantDeliveryDate } from '../../domain/delivery-schedule'
+import { DEFAULT_DASHBOARD_SETTINGS } from '../settings/settings-store'
 import { CustomersFeature } from './CustomersFeature'
 import { loadCustomerProfile } from './customer-profile'
 
@@ -73,7 +74,7 @@ describe('CustomersFeature', () => {
     // fixture catalog. Asserting this proves the engine repriced the repeat, rather than copying the old total.
     expect(created.subtotalCentavos).toBe(22500)
     expect(created.totalCentavos).toBe(22500)
-    expect(created.deliveryDate).toBe(relevantDeliveryDate())
+    expect(created.deliveryDate).toBe(getRelevantDeliveryDate(new Date(), DEFAULT_DASHBOARD_SETTINGS))
     await adapter.close()
   })
 

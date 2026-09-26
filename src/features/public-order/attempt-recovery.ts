@@ -1,4 +1,4 @@
-import type { PublicOrderDraftItem, PublicOrderInput } from './api'
+import type { PublicOrderDelivery, PublicOrderDraftItem, PublicOrderInput } from './api'
 
 export const PUBLIC_ORDER_ATTEMPT_STORAGE_KEY = 'gelly-public-order-attempt-v1'
 export const PUBLIC_ORDER_ATTEMPT_TTL_MS = 45 * 60 * 1000
@@ -128,6 +128,16 @@ export function savePublicOrderAttempt(attempt: PublicOrderAttempt): void {
   } catch {
     // Session storage can be unavailable in private browsing. The in-memory retry still works.
   }
+}
+
+/**
+ * The delivery day to show after a reload: the saved attempt's day while it is
+ * still offered, otherwise the first offered day.
+ */
+export function restoredDeliveryDate(attempt: PublicOrderAttempt | null, options: readonly PublicOrderDelivery[]): string | null {
+  const saved = attempt?.payload.deliveryDate
+  if (saved && options.some((option) => option.deliveryDate === saved)) return saved
+  return options[0]?.deliveryDate ?? null
 }
 
 export function clearPublicOrderAttempt(): void {

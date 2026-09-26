@@ -1,50 +1,41 @@
-# Import pipeline development
+# Intake development
 
-Intake is two paths into one review surface. Viber paste stays on Import. Public `/order` submissions land in the same pending inbox once that host path is activated. Neither public ordering nor OpenRouter extraction is live in production until the manual steps in [RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md).
+Orders reach the dashboard three ways: customers submit the public `/order` form and the owner accepts them from the **Inbox**; the owner enters Viber-only orders with **New order** or **Repeat**; and past delivered orders enter once through **Settings → Import history**. Every path prices through `priceOrder()` in `src/domain/pricing.ts`. No path trusts a price supplied by a customer, a file, or the browser. Public ordering is not live in production until the steps in [RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md) are complete.
 
-## Viber paste
+## Public `/order`
 
-Paste ordinary Viber messages into Import and create drafts. Free-form text is the primary path. It is sent only to `/.netlify/functions/parse-orders` with the operator Bearer token. The function requires `OPENROUTER_API_KEY` and a pinned `OPENROUTER_MODEL` ending in `:free`; without those it returns HTTP 503. Paid models and `openrouter/auto` are rejected before any upstream call. The provider is asked for structure only. Client-side normalization uses the explicit alias map, then `priceOrder` from `src/domain/pricing.ts` for every draft. Source monetary claims are never read.
+The form loads its menu, payment instructions, and delivery options from the order-submissions function (`server/order-submissions-core.ts`, thin Netlify and Vercel adapters). Delivery options are every open day in the next seven Manila calendar days after the order cutoff, minus owner-closed dates (`getAvailableDeliveryDates` in `src/domain/delivery-schedule.ts`). The customer picks one; the server accepts only a date in the current option set. If every day in the window is closed but a later day exists, the menu reports that ordering is paused until that date.
 
-`parseLocalInput` still decides JSON / JSON Lines before the component can call `fetch`, so a valid JSON import stays offline. The copyable `@ChatGPT-in-Viber` prompt remains a secondary recovery tool, not the daily path.
+The quote revision is a hash of the whole settings row, so any change to prices, open days, closed dates, or the cutoff forces a reconfirmation. When the chosen day disappears, the form moves the customer to the first offered day and asks them to review before submitting again.
 
-## Confirm selected
+Controls that must stay in place: the honeypot field, the per-IP rate limit (`consume_order_submission_rate_limit`), the idempotency key with request-hash comparison, the 64 KiB body cap, the strict key whitelist, and the quote-revision and total check. The function fails closed without its server key or the submissions migration. It never exposes anonymous table access.
 
-Valid drafts are confirmed together. Unresolved required fields block confirmation; nonblocking warnings stay visible. Each result is handled individually: successes leave the working set, failures stay with an actionable error. Confirmation goes through `confirmImportDraft` → `adapter.confirmOrderWithResolution` only. There is no `createCustomer` / `createOrder` fallback, because those separate writes can orphan a customer or duplicate an order after an uncertain retry.
+## Inbox
 
-The first attempt stores a durable confirmation key and an exact `confirmationSnapshot`. A retry must reuse that snapshot. If the draft identity changed after the attempt, persist throws the restore-original message instead of minting a new order.
+Pending submissions live in `order_submissions` until the owner accepts or rejects them (`src/features/import/PendingInbox.tsx`, rendered by the Inbox tab). Accept creates a New, unpaid order through `accept_order_submission`; Mark Paid on Today remains the only payment action. The owner may edit a pending submission before accepting. The server re-prices the edit, and a changed delivery date must be one of the currently offered days. Contact details stay on the submission so a Viber reply can be copied. The Today board shows a banner linking to the Inbox while submissions are waiting.
 
-## Pending inbox
+## Schedule
 
-Public `/order` submissions are not operator drafts. They wait in `order_submissions` until Angela accepts or rejects them. The intended Import inbox shows a pending count, refreshes while visible, and accepts selected rows into New unpaid operational orders. Only the existing Mark Paid action records payment. Contact details stay on the submission so a Viber reply can be copied. This inbox is not live until the additive submissions migration is applied by hand and the server-only service role is configured on the host.
+Open weekdays, closed dates, cutoff, and delivery window are owner settings stored in the single `order_dashboard_settings` row (`src/features/settings/settings-store.ts`). Closed dates are Manila `YYYY-MM-DD` strings, de-duplicated, sorted, capped at 60, and pruned of past dates on save. The Today, Orders, and Customers screens read the same settings through `useDashboardSettings` and `getRelevantDeliveryDate`; no screen hardcodes delivery weekdays.
 
-## Seven-day recovery
+## History import
 
-Unfinished paste text, drafts, and in-progress confirmation snapshots are stored owner-scoped in `localStorage` under `gelly-import-recovery:` (`src/features/import/draft-recovery.ts`). Snapshots expire after seven days (`IMPORT_RECOVERY_TTL_MS`). Corrupt structured payloads are cleared. Blocked storage returns null and does not throw. A failed clone clears the snapshot rather than returning a partial workspace. Sign-out should call `clearImportWorkspace` so another person on the same browser does not recover Angela’s paste.
+`/settings/import-history` is a lazy-loaded, owner-only page for bringing in past delivered orders once. It reads a JSON Lines file locally in the browser (nothing is uploaded until an order is confirmed). Each line is one past order:
 
-## Offline test stub
-
-Tests must not call OpenRouter. Mock the endpoint with `vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ orders: [...] }), { status: 200 })))`. The existing parser tests cover the local path without a fetch call. The realistic threads used by manual/extraction tests are in `test/fixtures/import/builder/viber-threads.ts`.
-
-Free-model qualification is `npx --no-install jiti scripts/openrouter-benchmark.ts`. With `OPENROUTER_API_KEY` unset it prints unresolved readiness, writes a local result file (path from `--out`, `OPENROUTER_BENCHMARK_OUT`, or a relative default), and exits 0 without a network call.
-
-## Manual browser check
-
-Operator Import (demo, no functions):
-
-```sh
-npm run dev -- --mode demo --host 127.0.0.1 --port 5176
+```json
+{"source_ref":"sheet row 14","customer_name":"Mika Santos","customer_phone":"09171234567","delivery_date":"2026-07-15","address":"Makati City","items":[{"product_slug":"matcha-latte","quantity":1,"level":2,"powder":"yumeno","sweetness":"light","cup_names":[]}],"thermal_bags":[{"covered_cup_count":1}],"notes":null}
 ```
 
-At 390 by 844, paste a short Viber thread (or JSON fixture content) and review the compact draft before confirming. JSON must not issue a `parse-orders` request. Change a level and confirm the displayed amount changes. Confirm selected and inspect `adapter.listOrders()` from a test/script. The bottom navigation remains visible on the mobile viewport.
+`source_ref`, `customer_name`, a past-or-today `delivery_date`, and at least one item are required. Price and total fields are ignored if present. Cancelled orders are not imported.
 
-Public `/order` is a separate unauthenticated page. `npm run dev -- --mode demo` does **not** serve `/.netlify/functions/order-submissions`, so the form fails closed with “Online ordering is unavailable.” That is accurate, not a stub menu.
+Each order is confirmed through the same durable path as other intake (`confirmImportDraft` → `create_order_with_confirmation`), which re-prices through `priceOrder()` and resolves the customer by name and phone. It is then advanced New → Paid → Delivered with the same patches the lifecycle buttons use. The client never supplies `paid_at` or `delivered_at`: the database trigger stamps them at import time, and the app shows **Imported** instead of those times for any order whose `raw_source` starts with `history-import:`. Insights and customer statistics use `delivery_date`, so imported history lands in the correct weeks.
 
-To review the real public form against an isolated loopback database (never production), map `API_URL` / `ANON_KEY` / `SERVICE_ROLE_KEY` from a private `supabase status -o env` capture into `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` without printing them, then:
+The import is resumable. A retry reuses the stored confirmation snapshot, gets the same order back, and continues advancing from its current status. Lines whose `source_ref` was already imported are flagged in the preview.
 
-```sh
-npx --no-install netlify functions:serve --port 9999
-LOCAL_ORDER_FUNCTIONS_URL=http://127.0.0.1:9999 npm run dev -- --host 127.0.0.1 --port 5176
-```
+## Parked text extraction
 
-Vite proxies `/.netlify/functions` only when `LOCAL_ORDER_FUNCTIONS_URL` is set. The function still prices through `priceOrder`. Do not treat that local receipt as production activation.
+The OpenRouter extraction function (`server/parse-orders-core.ts`, `server/openrouter.ts`) remains deployed but unconfigured and has no client entry point. Unsigned requests return 401; signed requests return 503 until `OPENROUTER_API_KEY` and a pinned `:free` `OPENROUTER_MODEL` are set. `scripts/openrouter-benchmark.ts` is the qualification harness; with no key it prints unresolved readiness and makes no network call. Re-enabling extraction needs a new client entry point and a passing benchmark.
+
+## Offline tests
+
+Tests never call external services. Mock `fetch` with `vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 })))`. The unit suite runs against `LocalAdapter`, which tolerates things Postgres does not, so any new persistence path also needs a `SupabaseAdapter` test built on `src/data/__tests__/fake-postgrest.ts`.

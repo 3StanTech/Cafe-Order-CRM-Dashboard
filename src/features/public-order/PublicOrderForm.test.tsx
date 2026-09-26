@@ -9,7 +9,7 @@ import {
   type PublicOrderMenu,
   type PublicOrderProduct,
 } from './api'
-import { PUBLIC_ORDER_ATTEMPT_STORAGE_KEY } from './attempt-recovery'
+import { PUBLIC_ORDER_ATTEMPT_STORAGE_KEY, restoredDeliveryDate, type PublicOrderAttempt } from './attempt-recovery'
 import { PublicOrderForm } from './PublicOrderForm'
 
 const REVISION_A = 'a'.repeat(64)
@@ -42,6 +42,30 @@ function makeMenu(overrides: Partial<PublicOrderMenu> = {}): PublicOrderMenu {
     products: [matchaLatte()],
     ...overrides,
   }
+}
+
+function day(deliveryDate: string) {
+  return { deliveryDate, deliveryWindowStart: '08:00', deliveryWindowEnd: '09:00' }
+}
+
+function menuWithDays(dates: string[], overrides: Partial<PublicOrderMenu> = {}): PublicOrderMenu {
+  return makeMenu({ delivery: day(dates[0]), deliveryOptions: dates.map(day), ...overrides })
+}
+
+function longDate(value: string): string {
+  return new Intl.DateTimeFormat('en-PH', { dateStyle: 'full', timeZone: 'Asia/Manila' }).format(new Date(`${value}T00:00:00.000Z`))
+}
+
+function headingDate(): string | null | undefined {
+  return document.querySelector('#public-order-heading time')?.getAttribute('datetime')
+}
+
+function radioFor(date: string): HTMLInputElement {
+  return screen.getAllByRole('radio').find((radio) => (radio as HTMLInputElement).value === date) as HTMLInputElement
+}
+
+function receiptFor(deliveryDate: string, totalCentavos = 20000) {
+  return { submitted: true, status: 'pending', reference: 'MBA-2001', deliveryDate, totalCentavos, pendingAngelaAcceptance: true }
 }
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -414,5 +438,158 @@ describe('PublicOrderForm', () => {
     expect(parseSubmit(posted[0][1]).idempotencyKey).toBe(parseSubmit(posted[1][1]).idempotencyKey)
     expect(parseSubmit(posted[0][1])).toEqual(parseSubmit(posted[1][1]))
     expect(screen.queryByRole('heading', { name: 'Order submitted' })).not.toBeInTheDocument()
+  })
+})
+
+describe('PublicOrderForm delivery day', () => {
+  const DAYS = ['2026-09-15', '2026-09-16', '2026-09-18']
+
+  it('defaults to the first offered day, follows the selection in the heading, and submits it', async () => {
+    const fetcher = vi.fn<PublicOrderFetch>(async (input, init) => {
+      if (isSubmitRequest(input)) return jsonResponse(200, receiptFor(parseSubmit(init).deliveryDate))
+      throw new Error(`unexpected ${String(input)}`)
+    })
+    render(<PublicOrderForm menu={menuWithDays(DAYS)} endpoint={ENDPOINT} fetcher={fetcher} storage={null} onMenuRevisionChange={vi.fn()} />)
+    expect(screen.getByRole('group', { name: 'Delivery day' })).toBeInTheDocument()
+    expect(screen.getAllByRole('radio').map((radio) => (radio as HTMLInputElement).value)).toEqual(DAYS)
+    expect(radioFor('2026-09-15')).toBeChecked()
+    expect(headingDate()).toBe('2026-09-15')
+
+    const user = await fillRequiredDetails()
+    await user.click(radioFor('2026-09-18'))
+    expect(radioFor('2026-09-18')).toBeChecked()
+    expect(radioFor('2026-09-15')).not.toBeChecked()
+    expect(headingDate()).toBe('2026-09-18')
+
+    await user.click(screen.getByRole('button', { name: 'Review and submit order' }))
+    await screen.findByRole('heading', { name: 'Order submitted' })
+    const posted = fetcher.mock.calls.filter(([request]) => isSubmitRequest(request))
+    expect(parseSubmit(posted[0][1]).deliveryDate).toBe('2026-09-18')
+  })
+
+  it('moves between delivery days with the keyboard', async () => {
+    render(<PublicOrderForm menu={menuWithDays(DAYS)} endpoint={ENDPOINT} fetcher={vi.fn()} storage={null} onMenuRevisionChange={vi.fn()} />)
+    const user = userEvent.setup()
+    radioFor('2026-09-15').focus()
+    await user.keyboard('{ArrowRight}')
+    expect(radioFor('2026-09-16')).toBeChecked()
+    expect(headingDate()).toBe('2026-09-16')
+  })
+
+  it('keeps the chosen day through a reconfirm while it is still offered', async () => {
+    const refreshed = menuWithDays(['2026-09-16', '2026-09-18'], { quoteRevision: REVISION_B })
+    let submits = 0
+    const fetcher = vi.fn<PublicOrderFetch>(async (input, init) => {
+      if (isSubmitRequest(input)) {
+        submits += 1
+        if (submits === 1) {
+          return jsonResponse(409, {
+            code: 'RECONFIRM_REQUIRED',
+            error: 'The delivery date or total changed. Please review the updated quote before submitting.',
+            delivery: refreshed.delivery,
+            deliveryOptions: refreshed.deliveryOptions,
+            quoteRevision: REVISION_B,
+            quote: { itemsSubtotalCentavos: 20000, thermalBagsTotalCentavos: 0, totalCentavos: 20000 },
+            items: [],
+            thermalBags: [],
+          })
+        }
+        return jsonResponse(200, receiptFor(parseSubmit(init).deliveryDate))
+      }
+      if (isMenuRequest(input)) return jsonResponse(200, refreshed)
+      throw new Error(`unexpected ${String(input)}`)
+    })
+    render(<StatefulForm initialMenu={menuWithDays(DAYS)} fetcher={fetcher} />)
+    const user = await fillRequiredDetails()
+    await user.click(radioFor('2026-09-18'))
+    await user.click(screen.getByRole('button', { name: 'Review and submit order' }))
+    await screen.findByRole('heading', { name: 'Review updated order details' })
+    expect(radioFor('2026-09-18')).toBeChecked()
+    expect(screen.queryByText('That day is no longer available', { exact: false })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Confirm updated quote' }))
+    await user.click(screen.getByRole('button', { name: 'Review and submit order' }))
+    await screen.findByRole('heading', { name: 'Order submitted' })
+    const posted = fetcher.mock.calls.filter(([request]) => isSubmitRequest(request))
+    expect(parseSubmit(posted[1][1]).deliveryDate).toBe('2026-09-18')
+    expect(parseSubmit(posted[1][1]).quoteRevision).toBe(REVISION_B)
+  })
+
+  it('moves the order to the first offered day when the chosen day is gone', async () => {
+    const refreshed = menuWithDays(['2026-09-16', '2026-09-17'], { quoteRevision: REVISION_B })
+    let submits = 0
+    const fetcher = vi.fn<PublicOrderFetch>(async (input, init) => {
+      if (isSubmitRequest(input)) {
+        submits += 1
+        if (submits === 1) {
+          return jsonResponse(409, {
+            code: 'RECONFIRM_REQUIRED',
+            error: 'The delivery date or total changed. Please review the updated quote before submitting.',
+            delivery: refreshed.delivery,
+            deliveryOptions: refreshed.deliveryOptions,
+            quoteRevision: REVISION_B,
+            quote: { itemsSubtotalCentavos: 20000, thermalBagsTotalCentavos: 0, totalCentavos: 20000 },
+            items: [],
+            thermalBags: [],
+          })
+        }
+        return jsonResponse(200, receiptFor(parseSubmit(init).deliveryDate))
+      }
+      if (isMenuRequest(input)) return jsonResponse(200, refreshed)
+      throw new Error(`unexpected ${String(input)}`)
+    })
+    render(<StatefulForm initialMenu={menuWithDays(DAYS)} fetcher={fetcher} />)
+    const user = await fillRequiredDetails()
+    await user.click(radioFor('2026-09-18'))
+    await user.click(screen.getByRole('button', { name: 'Review and submit order' }))
+    await screen.findByRole('heading', { name: 'Review updated order details' })
+    expect(await screen.findByText(`That day is no longer available — we moved your order to ${longDate('2026-09-16')}. Please review before submitting.`)).toBeInTheDocument()
+    expect(screen.getAllByRole('radio').map((radio) => (radio as HTMLInputElement).value)).toEqual(['2026-09-16', '2026-09-17'])
+    expect(radioFor('2026-09-16')).toBeChecked()
+    expect(headingDate()).toBe('2026-09-16')
+    await user.click(screen.getByRole('button', { name: 'Confirm updated quote' }))
+    await user.click(screen.getByRole('button', { name: 'Review and submit order' }))
+    await screen.findByRole('heading', { name: 'Order submitted' })
+    const posted = fetcher.mock.calls.filter(([request]) => isSubmitRequest(request))
+    expect(parseSubmit(posted[0][1]).deliveryDate).toBe('2026-09-18')
+    expect(parseSubmit(posted[1][1]).deliveryDate).toBe('2026-09-16')
+  })
+
+  function savedAttempt(deliveryDate: string): PublicOrderAttempt {
+    const payload: PublicOrderInput = {
+      customerName: 'Ana',
+      customerPhone: '09171234567',
+      address: 'Makati City',
+      deliveryDate,
+      notes: null,
+      items: [{ productSlug: 'matcha-latte', quantity: 1, modifiers: { level: 1, powder: 'yumeno', sweetness: 'regular' } }],
+      thermalBags: [],
+      quoteRevision: REVISION_A,
+      quotedTotalCentavos: 20000,
+      idempotencyKey: 'public-order-restored-key-01',
+      honeypot: '',
+    }
+    return { idempotencyKey: payload.idempotencyKey, payload, uncertain: false, savedAt: Date.now() }
+  }
+
+  it('restores the saved delivery day after a reload while it is still offered', () => {
+    sessionStorage.setItem(PUBLIC_ORDER_ATTEMPT_STORAGE_KEY, JSON.stringify(savedAttempt('2026-09-16')))
+    render(<PublicOrderForm menu={menuWithDays(DAYS)} endpoint={ENDPOINT} fetcher={vi.fn()} storage={null} onMenuRevisionChange={vi.fn()} />)
+    expect(radioFor('2026-09-16')).toBeChecked()
+    expect(headingDate()).toBe('2026-09-16')
+  })
+
+  it('falls back to the first offered day when the saved day is no longer offered', () => {
+    sessionStorage.setItem(PUBLIC_ORDER_ATTEMPT_STORAGE_KEY, JSON.stringify(savedAttempt('2026-09-14')))
+    render(<PublicOrderForm menu={menuWithDays(DAYS)} endpoint={ENDPOINT} fetcher={vi.fn()} storage={null} onMenuRevisionChange={vi.fn()} />)
+    expect(radioFor('2026-09-15')).toBeChecked()
+    expect(headingDate()).toBe('2026-09-15')
+  })
+
+  it('resolves the restored day from the offered list', () => {
+    const options = DAYS.map(day)
+    expect(restoredDeliveryDate(savedAttempt('2026-09-18'), options)).toBe('2026-09-18')
+    expect(restoredDeliveryDate(savedAttempt('2026-09-20'), options)).toBe('2026-09-15')
+    expect(restoredDeliveryDate(null, options)).toBe('2026-09-15')
+    expect(restoredDeliveryDate(null, [])).toBeNull()
   })
 })

@@ -1,11 +1,13 @@
 import { Check, Clipboard, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { DrinkFamily, Powder, ProductSlug, Sweetness } from '../../domain/contracts'
+import { formatClockTime } from '../../domain/delivery-schedule'
 import { formatPesos } from '../../domain/money'
 import { MAX_CUPS_PER_ORDER } from '../../domain/pricing'
 import {
   getPublicOrderMenu,
   getReconfirmation,
+  menuDeliveryOptions,
   PublicOrderApiError,
   publicOrderErrorMessage,
   submitPublicOrder,
@@ -20,6 +22,7 @@ import {
 import {
   clearPublicOrderAttempt,
   readPublicOrderAttempt,
+  restoredDeliveryDate,
   savePublicOrderAttempt,
 } from './attempt-recovery'
 import { pricePublicOrder, type PublicOrderDraft } from './quote'
@@ -132,16 +135,12 @@ function formatLongDate(value: string): string {
   return new Intl.DateTimeFormat('en-PH', { dateStyle: 'full', timeZone: 'Asia/Manila' }).format(parsed)
 }
 
-function formatTime(value: string): string {
-  const [hour, minute] = value.split(':').map(Number)
-  if (!Number.isSafeInteger(hour) || !Number.isSafeInteger(minute)) return value
-  const suffix = hour >= 12 ? 'PM' : 'AM'
-  const twelveHour = hour % 12 || 12
-  return minute === 0 ? `${twelveHour} ${suffix}` : `${twelveHour}:${String(minute).padStart(2, '0')} ${suffix}`
+function formatWindow(delivery: PublicOrderDelivery): string {
+  return `${formatClockTime(delivery.deliveryWindowStart)}–${formatClockTime(delivery.deliveryWindowEnd)}`
 }
 
-function formatWindow(delivery: PublicOrderDelivery): string {
-  return `${formatTime(delivery.deliveryWindowStart)}–${formatTime(delivery.deliveryWindowEnd)}`
+function movedDateNotice(date: string): string {
+  return `That day is no longer available — we moved your order to ${formatLongDate(date)}. Please review before submitting.`
 }
 
 function fieldErrorFor(name: keyof FieldErrors, values: { customerName: string; customerPhone: string; address: string }): string | undefined {
@@ -291,6 +290,7 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
   const [submitting, setSubmitting] = useState(false)
   const [reconfirm, setReconfirm] = useState<ReconfirmState | null>(null)
   const [receipt, setReceipt] = useState<LocalReceipt | null>(null)
+  const [selectedDate, setSelectedDate] = useState(() => restoredDeliveryDate(restoredAttempt, menuDeliveryOptions(menu)) ?? menu.delivery.deliveryDate)
   const [orderLocked, setOrderLocked] = useState(() => Boolean(restoredAttempt?.uncertain))
   const submissionKeyRef = useRef(restoredPayload?.idempotencyKey ?? newIdempotencyKey())
   const lastAttemptRef = useRef<PublicOrderInput | null>(restoredPayload)
@@ -311,6 +311,10 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
   }, [draft, lines.length, menu])
   const displayTotals = reconfirm?.quote ?? localQuoteResult.quote?.totals ?? null
   const totalCupsInOrder = totalCups(lines)
+  const offeredDates = reconfirm?.deliveryOptions ?? menuDeliveryOptions(menu)
+  const selectedDelivery = offeredDates.find((option) => option.deliveryDate === selectedDate) ?? offeredDates[0] ?? menu.delivery
+  // A pending reconfirm may still move the day; any other lock freezes it with the rest of the order.
+  const dateLocked = orderLocked && !(reconfirm && !reconfirm.confirmed)
 
   const invalidateSubmission = () => {
     if (uncertainTransportRef.current || orderLocked) return
@@ -326,6 +330,12 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
     if (field === 'customerPhone') setCustomerPhone(value)
     if (field === 'address') setAddress(value)
     setFieldErrors((current) => ({ ...current, [field]: undefined }))
+  }
+
+  const chooseDate = (date: string) => {
+    if (dateLocked) return
+    invalidateSubmission()
+    setSelectedDate(date)
   }
 
   const updateLine = (id: string, patch: Partial<OrderLine>) => {
@@ -413,7 +423,7 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
       setFormError('Review the updated delivery date and total, then confirm the updated quote before submitting again.')
       return
     }
-    const delivery = reconfirm?.delivery ?? menu.delivery
+    const delivery = selectedDelivery
     const quoteRevision = reconfirm?.quoteRevision ?? menu.quoteRevision
     const input = retryingStored && lastAttemptRef.current
       ? lastAttemptRef.current
@@ -465,8 +475,12 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
         } catch {
           // Keep showing the server quote even if the full menu refresh fails.
         }
+        const kept = fresh.deliveryOptions.find((option) => option.deliveryDate === input.deliveryDate)
+        const next = kept ?? fresh.deliveryOptions[0] ?? fresh.delivery
+        setSelectedDate(next.deliveryDate)
         setReconfirm({ ...fresh, confirmed: false })
         setFormError(fresh.error)
+        if (!kept) setFormNotice(movedDateNotice(next.deliveryDate))
       } else if (isUncertainTransport(cause)) {
         uncertainTransportRef.current = true
         persistAttempt(input, true)
@@ -494,7 +508,7 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
     if (previous) {
       const updated = {
         ...previous,
-        deliveryDate: reconfirm.delivery.deliveryDate,
+        deliveryDate: selectedDelivery.deliveryDate,
         quoteRevision: reconfirm.quoteRevision,
         quotedTotalCentavos: reconfirm.quote.totalCentavos,
         idempotencyKey: submissionKeyRef.current,
@@ -504,7 +518,7 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
     }
     setReconfirm({ ...reconfirm, confirmed: true })
     setFormError(null)
-    setFormNotice(`Updated total ${formatPesos(reconfirm.quote.totalCentavos)} for ${formatLongDate(reconfirm.delivery.deliveryDate)} is ready. Submit again when you are ready.`)
+    setFormNotice(`Updated total ${formatPesos(reconfirm.quote.totalCentavos)} for ${formatLongDate(selectedDelivery.deliveryDate)} is ready. Submit again when you are ready.`)
   }
 
   const resetDetails = () => {
@@ -529,6 +543,7 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
     clearPublicOrderAttempt()
     setReceipt(null)
     setReconfirm(null)
+    setSelectedDate(menuDeliveryOptions(menu)[0]?.deliveryDate ?? menu.delivery.deliveryDate)
     setLines([defaultLine(first)])
     setThermalBags([])
     setHoneypot('')
@@ -548,14 +563,14 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
     </div>
     <section className="motion-fade-up" aria-labelledby="public-order-heading">
       <p className="text-xs font-black uppercase tracking-[0.16em] text-[#4F74C8]">Order link</p>
-      <h1 id="public-order-heading" className="mt-2 text-3xl font-black tracking-tight text-[#20242F] sm:text-4xl">Order for <time dateTime={menu.delivery.deliveryDate}>{formatShortDate(menu.delivery.deliveryDate)}</time></h1>
-      <p className="mt-1 text-sm leading-6 text-[#586782]">Delivery is {formatWindow(menu.delivery)}. Place your order before the server cutoff.</p>
+      <h1 id="public-order-heading" className="mt-2 text-3xl font-black tracking-tight text-[#20242F] sm:text-4xl">Order for <time dateTime={selectedDelivery.deliveryDate}>{formatShortDate(selectedDelivery.deliveryDate)}</time></h1>
+      <p className="mt-1 text-sm leading-6 text-[#586782]">Delivery is {formatWindow(selectedDelivery)}. Place your order before the server cutoff.</p>
     </section>
 
     {formError && <div role="alert" className="motion-fade-in mt-5 rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold leading-5 text-red-800">{formError}</div>}
     {formNotice && <div role="status" className="motion-fade-in mt-5 flex gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm font-semibold leading-5 text-emerald-800"><Check aria-hidden="true" className="mt-0.5 shrink-0" size={18} />{formNotice}</div>}
     {reconfirm && <section className="motion-fade-in mt-5 rounded-2xl border-2 border-[#4F74C8]/35 bg-[#EAF0FF] p-4" aria-labelledby="reconfirm-heading">
-      <div className="flex items-start gap-3"><RefreshCw aria-hidden="true" className="mt-0.5 shrink-0 text-[#4F74C8]" size={20} /><div><h2 id="reconfirm-heading" className="font-black text-[#20242F]">Review updated order details</h2><p className="mt-1 text-sm leading-5 text-[#465675]">{reconfirm.error}</p><p className="mt-2 text-sm font-bold text-[#20242F]">New delivery: {formatLongDate(reconfirm.delivery.deliveryDate)} · {formatWindow(reconfirm.delivery)}</p><p className="mt-1 text-lg font-black text-[#4F74C8]">New total: {formatPesos(reconfirm.quote.totalCentavos)}</p></div></div>
+      <div className="flex items-start gap-3"><RefreshCw aria-hidden="true" className="mt-0.5 shrink-0 text-[#4F74C8]" size={20} /><div><h2 id="reconfirm-heading" className="font-black text-[#20242F]">Review updated order details</h2><p className="mt-1 text-sm leading-5 text-[#465675]">{reconfirm.error}</p><p className="mt-2 text-sm font-bold text-[#20242F]">New delivery: {formatLongDate(selectedDelivery.deliveryDate)} · {formatWindow(selectedDelivery)}</p><p className="mt-1 text-lg font-black text-[#4F74C8]">New total: {formatPesos(reconfirm.quote.totalCentavos)}</p></div></div>
       {!reconfirm.confirmed && <button type="button" onClick={confirmUpdatedQuote} className="mt-3 min-h-11 w-full rounded-xl bg-[#4F74C8] px-4 text-sm font-bold text-white transition-colors hover:bg-[#365AA9] sm:w-auto">Confirm updated quote</button>}
       {reconfirm.confirmed && <p className="mt-3 text-sm font-bold text-[#24633B]">Updated quote confirmed. Submit again when ready.</p>}
     </section>}
@@ -586,6 +601,19 @@ export function PublicOrderForm({ menu, endpoint, fetcher, storage, onMenuRevisi
         })}
       </div>
       <button type="button" disabled={orderLocked || totalCupsInOrder >= MAX_CUPS_PER_ORDER} onClick={addDrink} className="mt-4 flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#4F74C8]/35 px-4 text-sm font-bold text-[#365AA9] transition-colors hover:bg-[#4F74C8]/10 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"><Plus aria-hidden="true" size={17} />Add another drink</button>
+    </section>
+
+    <section className={`${cardClass} mt-4`}>
+      <fieldset disabled={dateLocked}>
+        <legend className="text-lg font-black text-[#20242F]">Delivery day</legend>
+        <p className="mt-1 text-sm text-[#586782]">Delivery window {formatWindow(selectedDelivery)}.</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {offeredDates.map((option) => <label key={option.deliveryDate} className="cursor-pointer has-[:disabled]:cursor-not-allowed">
+            <input type="radio" name="delivery-day" value={option.deliveryDate} checked={option.deliveryDate === selectedDelivery.deliveryDate} onChange={() => chooseDate(option.deliveryDate)} className="peer sr-only" />
+            <span className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-[#4F74C8]/30 bg-white px-4 text-sm font-bold text-[#365AA9] transition-colors hover:bg-[#4F74C8]/10 peer-checked:border-[#4F74C8] peer-checked:bg-[#4F74C8] peer-checked:text-white peer-focus-visible:ring-2 peer-focus-visible:ring-[#4F74C8]/40 peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-[#FBF3D5] peer-disabled:opacity-60"><time dateTime={option.deliveryDate}>{formatShortDate(option.deliveryDate)}</time></span>
+          </label>)}
+        </div>
+      </fieldset>
     </section>
 
     <section className={`${cardClass} mt-4`} aria-labelledby="customer-heading">

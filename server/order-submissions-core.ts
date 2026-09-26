@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import { getNextAvailableDeliveryDate } from '../src/domain/delivery-schedule'
+import { formatDeliveryDate, getAvailableDeliveryDates, getNextAvailableDeliveryDate, type DeliveryDateResult } from '../src/domain/delivery-schedule'
 import { PRODUCT_CATALOG, priceOrder, type OrderDraft, type ProductSlug, type Powder, type Sweetness } from '../src/domain'
 import { ORDER_DASHBOARD_SETTINGS_KEY, parseDashboardSettings, type DashboardSettings } from '../src/features/settings/settings-store'
 import { PricingError } from '../src/domain/pricing-error'
@@ -50,8 +50,11 @@ type SubmissionRow = {
 type PublicConfig = {
   settings: DashboardSettings
   revision: string
-  nextDelivery: ReturnType<typeof getNextAvailableDeliveryDate>
+  deliveryOptions: DeliveryDateResult[]
+  nextDelivery: DeliveryDateResult
 }
+
+type PublicConfigResult = { config: PublicConfig } | { error: string }
 
 type ServerEnv = { process?: { env?: Record<string, string | undefined> } }
 
@@ -188,13 +191,25 @@ export function parsePublicOrderInput(value: unknown): { input: PublicOrderInput
   return { input: { customerName, customerPhone, address, deliveryDate, notes: notesValue, items, thermalBags, quoteRevision: value.quoteRevision, quotedTotalCentavos: value.quotedTotalCentavos as number, idempotencyKey: value.idempotencyKey } }
 }
 
-async function publicConfig(client: SupabaseClient, now: Date): Promise<PublicConfig | null> {
+const NOT_CONFIGURED = 'Online ordering is not configured yet.'
+
+async function publicConfig(client: SupabaseClient, now: Date): Promise<PublicConfigResult> {
   const { data, error } = await client.from('settings').select('value').eq('key', ORDER_DASHBOARD_SETTINGS_KEY).maybeSingle()
-  if (error || !data) return null
+  if (error || !data) return { error: NOT_CONFIGURED }
   const settings = parseDashboardSettings(data.value)
-  if (!settings.gCashNumber || settings.openDays.length === 0) return null
-  const nextDelivery = getNextAvailableDeliveryDate(now, settings)
-  return nextDelivery ? { settings, revision: await sha256(JSON.stringify(settings)), nextDelivery } : null
+  if (!settings.gCashNumber || settings.openDays.length === 0) return { error: NOT_CONFIGURED }
+  const deliveryOptions = getAvailableDeliveryDates(now, settings)
+  const nextDelivery = deliveryOptions[0] ?? null
+  if (!nextDelivery) {
+    // Closed dates can empty the whole offered window while a later run still exists.
+    const later = getNextAvailableDeliveryDate(now, settings)
+    return { error: later ? `Online ordering is paused until ${formatDeliveryDate(later.deliveryDate)}.` : NOT_CONFIGURED }
+  }
+  return { config: { settings, revision: await sha256(JSON.stringify(settings)), deliveryOptions, nextDelivery } }
+}
+
+function isOfferedDate(config: PublicConfig, date: string): boolean {
+  return config.deliveryOptions.some((option) => option.deliveryDate === date)
 }
 
 function publicProducts(settings: DashboardSettings): Record<string, unknown>[] {
@@ -214,14 +229,16 @@ function publicProducts(settings: DashboardSettings): Record<string, unknown>[] 
 }
 
 export async function getPublicOrderMenu(client: SupabaseClient, now = new Date()): Promise<CoreResult> {
-  const config = await publicConfig(client, now)
-  if (!config) return { status: 503, body: { error: 'Online ordering is not configured yet.' } }
+  const resolved = await publicConfig(client, now)
+  if ('error' in resolved) return { status: 503, body: { error: resolved.error } }
+  const { config } = resolved
   return {
     status: 200,
     body: {
       business: { name: config.settings.businessName, description: config.settings.businessDescription, contact: config.settings.businessContact },
       payment: { method: 'GCash', account: config.settings.gCashNumber, instructions: `Pay via GCash to ${config.settings.gCashNumber} after submitting, then send your screenshot in Viber.` },
       delivery: config.nextDelivery,
+      deliveryOptions: config.deliveryOptions,
       quoteRevision: config.revision,
       products: publicProducts(config.settings),
     },
@@ -229,7 +246,7 @@ export async function getPublicOrderMenu(client: SupabaseClient, now = new Date(
 }
 
 function quoteBody(config: PublicConfig, priced: ReturnType<typeof priceOrder>): Record<string, unknown> {
-  return { delivery: config.nextDelivery, quoteRevision: config.revision, quote: priced.totals, items: priced.items, thermalBags: priced.thermalBags }
+  return { delivery: config.nextDelivery, deliveryOptions: config.deliveryOptions, quoteRevision: config.revision, quote: priced.totals, items: priced.items, thermalBags: priced.thermalBags }
 }
 
 function storagePrice(priced: ReturnType<typeof priceOrder>, input: PublicOrderInput): Record<string, unknown> {
@@ -333,8 +350,9 @@ export async function submitPublicOrder(client: SupabaseClient, rawBody: string 
   const parsed = parsePublicOrderInput(parsedBody)
   if ('error' in parsed) return { status: 400, body: { error: parsed.error } }
   if (!clientIp || clientIp.length > 200) return { status: 503, body: { error: 'Online ordering is temporarily unavailable.' } }
-  const config = await publicConfig(client, now)
-  if (!config) return { status: 503, body: { error: 'Online ordering is not configured yet.' } }
+  const resolved = await publicConfig(client, now)
+  if ('error' in resolved) return { status: 503, body: { error: resolved.error } }
+  const { config } = resolved
   const requestHash = await sha256(canonicalInput(parsed.input))
   const rateKeyHash = await sha256(`${orderServerConfig()?.serviceRoleKey ?? 'server'}:${clientIp}`)
   const rate = await client.rpc('consume_order_submission_rate_limit', { p_key_hash: rateKeyHash, p_limit: SUBMISSION_RATE_LIMIT })
@@ -353,7 +371,7 @@ export async function submitPublicOrder(client: SupabaseClient, rawBody: string 
   try { priced = priceOrder(orderDraft, config.settings) } catch (error) {
     return { status: 422, body: { error: error instanceof PricingError ? error.message : 'The order selections are no longer available.' } }
   }
-  if (parsed.input.deliveryDate !== config.nextDelivery?.deliveryDate || parsed.input.quoteRevision !== config.revision || parsed.input.quotedTotalCentavos !== priced.totals.totalCentavos) {
+  if (!isOfferedDate(config, parsed.input.deliveryDate) || parsed.input.quoteRevision !== config.revision || parsed.input.quotedTotalCentavos !== priced.totals.totalCentavos) {
     return { status: 409, body: { code: 'RECONFIRM_REQUIRED', error: 'The delivery date or total changed. Please review the updated quote before submitting.', ...quoteBody(config, priced) } }
   }
   const pricedItems = storagePrice(priced, parsed.input)
@@ -427,15 +445,16 @@ export async function updatePendingSubmission(client: SupabaseClient, id: string
   if (!currentRow) return { status: 404, body: { error: 'Pending submission not found.' } }
   if (currentRow.status !== 'pending') return { status: 409, body: { error: 'Only pending submissions can be edited.' } }
   if (parsed.input.idempotencyKey !== currentRow.idempotency_key) return { status: 409, body: { error: 'The original confirmation key cannot be changed.' } }
-  const config = await publicConfig(client, now)
-  if (!config) return { status: 503, body: { error: 'Online ordering is not configured yet.' } }
+  const resolved = await publicConfig(client, now)
+  if ('error' in resolved) return { status: 503, body: { error: resolved.error } }
+  const { config } = resolved
   const draft: OrderDraft = { items: parsed.input.items.map(({ productSlug, quantity, modifiers }) => ({ productSlug, quantity, modifiers })), thermalBags: parsed.input.thermalBags }
   let priced: ReturnType<typeof priceOrder>
   try { priced = priceOrder(draft, config.settings) } catch (error) { return { status: 422, body: { error: error instanceof PricingError ? error.message : 'The edited selections are unavailable.' } } }
   const dateChanged = parsed.input.deliveryDate !== currentRow.delivery_date
   // Keep the submitted date for an address/name/notes edit, even after cutoff.
-  // A changed date is an explicit owner choice and must use the next available run.
-  if (parsed.input.quotedTotalCentavos !== priced.totals.totalCentavos || parsed.input.quoteRevision !== config.revision || (dateChanged && parsed.input.deliveryDate !== config.nextDelivery?.deliveryDate)) {
+  // A changed date is an explicit owner choice and must be one of the currently offered runs.
+  if (parsed.input.quotedTotalCentavos !== priced.totals.totalCentavos || parsed.input.quoteRevision !== config.revision || (dateChanged && !isOfferedDate(config, parsed.input.deliveryDate))) {
     return { status: 409, body: { code: 'RECONFIRM_REQUIRED', error: 'The edited delivery date or total changed. Review the updated quote.', ...quoteBody(config, priced) } }
   }
   // This hash identifies the current owner review revision, including the

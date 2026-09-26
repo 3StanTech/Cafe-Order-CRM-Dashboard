@@ -15,8 +15,8 @@ import { blankImportDraft } from '../orderDraftMapping'
  * must update the displayed validation total on the next re-render.
  *
  * Settings applies prices via applyDashboardSettings → setRuntimeCatalogSettings
- * (the same path saveDashboardSettings uses). ImportWorkspace then bumps a
- * catalog version counter so OrderEditorCard re-renders with draft unchanged.
+ * (the same path saveDashboardSettings uses). Any parent that re-renders after
+ * a settings change then re-renders OrderEditorCard with the draft unchanged.
  */
 function validDraft(): ImportDraft {
   const base = blankImportDraft()
@@ -62,7 +62,7 @@ describe('OrderEditorCard catalog price live update', () => {
       },
     })
 
-    // Parent re-render with draft unchanged — what ImportWorkspace does via setCatalogVersion.
+    // Parent re-render with draft unchanged, as after a settings change.
     rerender(<OrderEditorCard {...props} />)
 
     expect(screen.getByText(formatPhp(25_000))).toBeInTheDocument()

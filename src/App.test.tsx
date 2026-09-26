@@ -9,7 +9,7 @@ describe('application shell', () => {
     render(<App />)
     expect(screen.getByRole('heading', { name: 'Today' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Today' })).toHaveAttribute('aria-current', 'page')
-    for (const route of ['Import', 'Orders', 'Customers', 'Insights', 'Settings']) {
+    for (const route of ['Inbox', 'Orders', 'Customers', 'Insights', 'Settings']) {
       await user.click(screen.getByRole('link', { name: route }))
       expect(screen.getByRole('heading', { name: route })).toBeInTheDocument()
       expect(screen.getByRole('link', { name: route })).toHaveAttribute('aria-current', 'page')
@@ -26,17 +26,25 @@ describe('application shell', () => {
     expect(screen.queryByRole('navigation', { name: 'Primary navigation' })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('PIN')).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Today' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Import' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Inbox' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Sign out' })).not.toBeInTheDocument()
 
     fetchSpy.mockRestore()
   })
 
-  it('still shows the Import heading and operator nav on /import', async () => {
+  it('redirects the old /import link to the Inbox', async () => {
     window.history.pushState({}, '', '/import')
     render(<App />)
-    expect(screen.getByRole('navigation', { name: 'Primary navigation' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Import' })).toHaveAttribute('aria-current', 'page')
-    expect(await screen.findByRole('heading', { name: 'Import' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Inbox' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/inbox')
+    expect(screen.getByRole('link', { name: 'Inbox' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.queryByRole('link', { name: 'Import' })).not.toBeInTheDocument()
+  })
+
+  it('serves the one-time history import under Settings', async () => {
+    window.history.pushState({}, '', '/settings/import-history')
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Import history' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page')
   })
 })

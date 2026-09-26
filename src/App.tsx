@@ -15,36 +15,39 @@ import { isDemoMode } from './features/auth/supabaseAuth'
  * test branch (and the await) from the production bundle.
  */
 let TodayPage: ComponentType
-let ImportPage: ComponentType
+let InboxPage: ComponentType
 let OrdersPage: ComponentType
 let CustomersPage: ComponentType
 let InsightsPage: ComponentType
 let SettingsPage: ComponentType
+let HistoryImportPage: ComponentType
 let PublicOrderPage: ComponentType
 
 if (import.meta.env.MODE === 'test') {
-  const [today, imp, orders, customers, insights, settings, publicOrder] = await Promise.all([
+  const [today, inbox, orders, customers, insights, settings, historyImport, publicOrder] = await Promise.all([
     import('./pages/TodayPage'),
-    import('./pages/ImportPage'),
+    import('./pages/InboxPage'),
     import('./pages/OrdersPage'),
     import('./pages/CustomersPage'),
     import('./pages/InsightsPage'),
     import('./pages/SettingsPage'),
+    import('./pages/HistoryImportPage'),
     import('./pages/PublicOrderPage'),
   ])
   TodayPage = today.TodayPage
-  ImportPage = imp.ImportPage
+  InboxPage = inbox.InboxPage
   OrdersPage = orders.OrdersPage
   CustomersPage = customers.CustomersPage
   InsightsPage = insights.InsightsPage
   SettingsPage = settings.SettingsPage
+  HistoryImportPage = historyImport.HistoryImportPage
   PublicOrderPage = publicOrder.PublicOrderPage
 } else {
   TodayPage = lazy(() =>
     import('./pages/TodayPage').then((m) => ({ default: m.TodayPage })),
   )
-  ImportPage = lazy(() =>
-    import('./pages/ImportPage').then((m) => ({ default: m.ImportPage })),
+  InboxPage = lazy(() =>
+    import('./pages/InboxPage').then((m) => ({ default: m.InboxPage })),
   )
   OrdersPage = lazy(() =>
     import('./pages/OrdersPage').then((m) => ({ default: m.OrdersPage })),
@@ -57,6 +60,9 @@ if (import.meta.env.MODE === 'test') {
   )
   SettingsPage = lazy(() =>
     import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })),
+  )
+  HistoryImportPage = lazy(() =>
+    import('./pages/HistoryImportPage').then((m) => ({ default: m.HistoryImportPage })),
   )
   PublicOrderPage = lazy(() =>
     import('./pages/PublicOrderPage').then((m) => ({ default: m.PublicOrderPage })),
@@ -116,11 +122,13 @@ export default function App() {
           <Route element={<AppShell />}>
             <Route element={<SuspenseOutlet />}>
               <Route path="/today" element={<TodayPage />} />
-              <Route path="/import" element={<ImportPage />} />
+              <Route path="/inbox" element={<InboxPage />} />
+              <Route path="/import" element={<Navigate to="/inbox" replace />} />
               <Route path="/orders" element={<OrdersPage />} />
               <Route path="/customers" element={<CustomersPage />} />
               <Route path="/insights" element={<InsightsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/settings/import-history" element={<HistoryImportPage />} />
               <Route path="/" element={<Navigate to="/today" replace />} />
               <Route path="*" element={<Navigate to="/today" replace />} />
             </Route>

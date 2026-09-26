@@ -26,6 +26,7 @@ The database stores customer and order data once Release 1 is connected. The fre
 
 - After Release 1 passes with an empty or newly started database, capture the schema/check results as the baseline.
 - Immediately before the Release 2 migration, save one verified data export from the new project. If there are no business rows, the schema is reproducible from reviewed SQL and the manifest should explicitly record zero counts.
+- Immediately after the one-time history import, export again so the imported customers and orders are in a verified backup before customers start ordering.
 - After activation, export at least monthly and immediately before later migrations or major releases.
 - Store exports in a durable private location outside the project folder. A folder name such as `cafe-backup-YYYY-MM-DD` is sufficient; avoid redundant copies unless a second storage location is part of the recovery plan.
 

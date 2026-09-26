@@ -9,7 +9,9 @@ import { useOrdersData } from '../orders/useOrdersData'
 import { OrderEditorModal } from '../order-editor/OrderEditorModal'
 import { blankImportDraft, storedOrderToImportDraft } from '../order-editor/orderDraftMapping'
 import { usePendingSubmissionCount } from '../import/pending-api'
-import { relevantDeliveryDate } from './delivery-dates'
+import { useStorageAdapter } from '../../data/useStorageAdapter'
+import { formatClockTime, getRelevantDeliveryDate } from '../../domain/delivery-schedule'
+import { useDashboardSettings } from '../settings/useDashboardSettings'
 
 function routeSort(left: StoredOrder, right: StoredOrder): number {
   const leftPosition = left.routePosition ?? Number.MAX_SAFE_INTEGER
@@ -26,7 +28,11 @@ function customerName(customers: StoredCustomer[], order: StoredOrder): string |
 }
 
 export function TodayBoard({ adapter: providedAdapter, initialDeliveryDate }: TodayBoardProps) {
-  const [deliveryDate, setDeliveryDate] = useState(initialDeliveryDate ?? relevantDeliveryDate)
+  const { adapter: contextAdapter } = useStorageAdapter()
+  const { settings } = useDashboardSettings(providedAdapter ?? contextAdapter)
+  // Until the owner picks a date, follow the configured schedule (it may load after first render).
+  const [pickedDate, setDeliveryDate] = useState<string | null>(initialDeliveryDate ?? null)
+  const deliveryDate = pickedDate ?? getRelevantDeliveryDate(new Date(), settings)
   const { adapter, customers, orders, loading, error } = useOrdersData(providedAdapter, { deliveryDate })
   const [view, setView] = useState<'board' | 'run'>('board')
   const [editorState, setEditorState] = useState<EditorState | null>(null)
@@ -64,7 +70,7 @@ export function TodayBoard({ adapter: providedAdapter, initialDeliveryDate }: To
       <header className="motion-fade-up flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-3xl font-black tracking-tight text-[#20242F]">Today</h1>
-          <p className="mt-1.5 text-sm leading-5 text-[#4A5365]">8–9 AM delivery run · orders close at 8 PM for the next morning.</p>
+          <p className="mt-1.5 text-sm leading-5 text-[#4A5365]">{formatClockTime(settings.deliveryWindowStart)}–{formatClockTime(settings.deliveryWindowEnd)} delivery run · orders close at {formatClockTime(settings.orderCutoff)} the night before.</p>
         </div>
         <label className="grid gap-1 text-sm font-semibold text-[#20242F]">
           Delivery date
@@ -74,11 +80,11 @@ export function TodayBoard({ adapter: providedAdapter, initialDeliveryDate }: To
 
       {pendingCount !== null && pendingCount > 0 && (
         <a
-          href="/import"
+          href="/inbox"
           className="mt-4 flex min-h-11 items-center justify-between gap-3 rounded-xl border border-[#4F74C8]/30 bg-[#EAF0FF] px-4 text-sm font-bold text-[#365AA9] transition-colors hover:bg-[#4F74C8]/10"
         >
           <span>{pendingCount} pending {pendingCount === 1 ? 'submission' : 'submissions'} to review</span>
-          <span>Open Import</span>
+          <span>Open Inbox</span>
         </a>
       )}
 

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PendingInbox } from '../PendingInbox'
@@ -384,5 +384,123 @@ describe('PendingInbox', () => {
 
     await waitFor(() => expect(updates).toBe(2))
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Review updated quote' })).not.toBeInTheDocument())
+  })
+})
+
+const OFFERED = ['2026-09-15', '2026-09-16']
+
+function offeredDay(deliveryDate: string) {
+  return { deliveryDate, deliveryWindowStart: '08:00', deliveryWindowEnd: '09:00' }
+}
+
+const publicMenu = {
+  business: { name: 'Made by Angela', description: 'Matcha cafe', contact: '09170000000' },
+  payment: { method: 'GCash', account: '09171234567', instructions: 'Send GCash screenshot in Viber.' },
+  delivery: offeredDay(OFFERED[0]),
+  deliveryOptions: OFFERED.map(offeredDay),
+  quoteRevision: 'b'.repeat(64),
+  products: [{
+    slug: 'matcha-latte',
+    name: 'Matcha Latte',
+    family: 'matcha',
+    flavor: 'plain',
+    milk: 'oat_milk',
+    basePriceCentavos: 20000,
+    modifierGroups: ['matcha_level', 'powder', 'sweetness'],
+    levelUpcharges: { 1: 0, 2: 2500, 3: 5000 },
+    powderUpcharges: { yumeno: 0, mk_isuzu: 6000 },
+    thermalBagPrices: { 1: 2500, 2: 3000, 3: 3500, 4: 3500 },
+    sweetnessOptions: ['none', 'light', 'regular', 'extra'],
+  }],
+}
+
+describe('PendingInbox delivery day', () => {
+  function inboxFetch(onUpdate: (body: Record<string, unknown>) => Response) {
+    return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('action=pending')) return Promise.resolve(new Response(JSON.stringify({ submissions: [pendingRow] }), { status: 200 }))
+      if (url.includes('action=menu')) return Promise.resolve(new Response(JSON.stringify(publicMenu), { status: 200 }))
+      if (url.includes('action=update')) return Promise.resolve(onUpdate(JSON.parse(String(init?.body)) as Record<string, unknown>))
+      return Promise.resolve(new Response(JSON.stringify({ error: 'unexpected' }), { status: 500 }))
+    })
+  }
+
+  it('offers only the submitted day and the currently offered days, and saves the chosen offered day', async () => {
+    withOwnerSession()
+    const user = userEvent.setup()
+    const fetchMock = inboxFetch((body) => new Response(JSON.stringify({
+      submission: { ...pendingRow, review_version: 1, review_hash: 'd'.repeat(64), delivery_date: body.deliveryDate },
+      previousTotalCentavos: 22500,
+      newTotalCentavos: 22500,
+      differenceCentavos: 0,
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<PendingInbox customers={[]} orders={[]} />)
+    expect(await screen.findByText('Synth Mika')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit' }))
+    const select = await screen.findByRole('combobox', { name: 'Offered delivery day' })
+    const values = within(select).getAllByRole('option').map((option) => (option as HTMLOptionElement).value)
+    expect(values).toEqual([pendingRow.delivery_date, ...OFFERED])
+    expect(select).toHaveValue(pendingRow.delivery_date)
+
+    await user.selectOptions(select, '2026-09-16')
+    await user.click(screen.getByRole('button', { name: 'Confirm order' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([request]) => String(request).includes('action=update'))).toBe(true))
+    const update = fetchMock.mock.calls.find(([request]) => String(request).includes('action=update'))
+    expect((JSON.parse(String(update?.[1]?.body)) as Record<string, unknown>).deliveryDate).toBe('2026-09-16')
+  })
+
+  it('shows only the offered-day control, so a non-offered date cannot be chosen', async () => {
+    withOwnerSession()
+    const user = userEvent.setup()
+    const fetchMock = inboxFetch(() => new Response(JSON.stringify({ error: 'unexpected' }), { status: 500 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<PendingInbox customers={[]} orders={[]} />)
+    expect(await screen.findByText('Synth Mika')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit' }))
+    const select = await screen.findByRole('combobox', { name: 'Offered delivery day' })
+    expect(screen.queryByLabelText('Delivery date')).not.toBeInTheDocument()
+    expect(within(select).queryByRole('option', { name: /not offered/ })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([request]) => String(request).includes('action=update'))).toHaveLength(0)
+  })
+
+  it('keeps the owner-chosen day through a reconfirm while it is still offered', async () => {
+    withOwnerSession()
+    const user = userEvent.setup()
+    const bodies: Record<string, unknown>[] = []
+    const fetchMock = inboxFetch((body) => {
+      bodies.push(body)
+      if (bodies.length === 1) {
+        return new Response(JSON.stringify({
+          code: 'RECONFIRM_REQUIRED',
+          error: 'The edited delivery date or total changed. Review the updated quote.',
+          delivery: offeredDay(OFFERED[0]),
+          deliveryOptions: OFFERED.map(offeredDay),
+          quoteRevision: 'e'.repeat(64),
+          quote: { itemsSubtotalCentavos: 22500, thermalBagsTotalCentavos: 0, totalCentavos: 22500 },
+          items: [],
+          thermalBags: [],
+        }), { status: 409 })
+      }
+      return new Response(JSON.stringify({
+        submission: { ...pendingRow, review_version: 1, review_hash: 'd'.repeat(64), delivery_date: body.deliveryDate },
+        previousTotalCentavos: 22500,
+        newTotalCentavos: 22500,
+        differenceCentavos: 0,
+      }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<PendingInbox customers={[]} orders={[]} />)
+    expect(await screen.findByText('Synth Mika')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit' }))
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Offered delivery day' }), '2026-09-16')
+    await user.click(screen.getByRole('button', { name: 'Confirm order' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirm updated quote' }))
+    await waitFor(() => expect(bodies).toHaveLength(2))
+    expect(bodies[1]?.deliveryDate).toBe('2026-09-16')
+    expect(bodies[1]?.quoteRevision).toBe('e'.repeat(64))
   })
 })

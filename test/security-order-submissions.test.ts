@@ -59,4 +59,13 @@ describe('public order submission security', () => {
     const omitted = parsePublicOrderInput(publicInput)
     expect(omitted).toHaveProperty('input')
   })
+
+  it('rejects a client-supplied deliveryOptions list instead of trusting it', () => {
+    const smuggled = parsePublicOrderInput({
+      ...publicInput,
+      deliveryDate: '2027-01-01',
+      deliveryOptions: [{ deliveryDate: '2027-01-01', deliveryWindowStart: '08:00', deliveryWindowEnd: '09:00' }],
+    })
+    expect(smuggled).toEqual({ error: 'The order form contains an unsupported field.' })
+  })
 })

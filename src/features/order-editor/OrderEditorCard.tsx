@@ -21,13 +21,15 @@ function SelectInput(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return <select {...props} className={`mt-1 min-h-11 w-full rounded-xl border border-[#4F74C8]/25 bg-white px-3 text-sm text-[#20242f] outline-none transition-colors focus:border-[#4F74C8] focus:ring-2 focus:ring-[#4F74C8]/20 ${props.className ?? ''}`} />
 }
 
-export function OrderEditorCard({ draft, customers, orders, confirming, onChange, onConfirm }: {
+export function OrderEditorCard({ draft, customers, orders, confirming, onChange, onConfirm, hideDeliveryDate = false }: {
   draft: ImportDraft
   customers: StoredCustomer[]
   orders: StoredOrder[]
   confirming: boolean
   onChange: (draft: ImportDraft) => void
   onConfirm: () => void
+  /** Set when the caller renders its own constrained delivery-day control. */
+  hideDeliveryDate?: boolean
 }) {
   const catalog = getRuntimeCatalog()
   // `catalog` reads as redundant to the linter, but it is load-bearing.
@@ -49,7 +51,7 @@ export function OrderEditorCard({ draft, customers, orders, confirming, onChange
       <div className="grid gap-3 sm:grid-cols-2">
         <FieldLabel>Customer name<TextInput aria-label="Customer name" value={draft.customerName ?? ''} onChange={(event) => mutate({ ...draft, customerName: event.target.value || null })} /></FieldLabel>
         <FieldLabel>Matched customer<SelectInput aria-label="Matched customer" value={draft.matchedCustomerId ?? ''} onChange={(event) => onChange({ ...draft, matchedCustomerId: event.target.value || null })}><option value="">Create new customer</option>{customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</SelectInput></FieldLabel>
-        <FieldLabel>Delivery date<TextInput aria-label="Delivery date" type="date" value={draft.deliveryDate ?? ''} onChange={(event) => onChange({ ...draft, deliveryDate: event.target.value || null })} /></FieldLabel>
+        {!hideDeliveryDate && <FieldLabel>Delivery date<TextInput aria-label="Delivery date" type="date" value={draft.deliveryDate ?? ''} onChange={(event) => onChange({ ...draft, deliveryDate: event.target.value || null })} /></FieldLabel>}
         <FieldLabel>Address<TextInput aria-label="Address" value={draft.address ?? ''} onChange={(event) => onChange({ ...draft, address: event.target.value || null })} /></FieldLabel>
       </div>
       <FieldLabel><span className="mt-3 block">Notes</span><TextInput aria-label="Notes" value={draft.notes ?? ''} onChange={(event) => onChange({ ...draft, notes: event.target.value || null })} /></FieldLabel>

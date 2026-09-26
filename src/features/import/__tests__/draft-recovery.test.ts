@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ImportDraft } from '../types'
 import {
+  HISTORY_IMPORT_RECOVERY_STORAGE_PREFIX,
   IMPORT_RECOVERY_STORAGE_PREFIX,
   IMPORT_RECOVERY_TTL_MS,
   IMPORT_RECOVERY_VERSION,
@@ -148,6 +149,25 @@ describe('import draft recovery', () => {
     expect(localStorage.getItem(getImportRecoveryStorageKey('owner-b'))).toBeNull()
     expect(localStorage.getItem(`${IMPORT_RECOVERY_STORAGE_PREFIX}raw-corrupt`)).toBeNull()
     expect(localStorage.getItem('unrelated-dashboard-key')).toBe('keep-me')
+  })
+
+  it('keeps the history import snapshot under its own key, apart from intake drafts', () => {
+    const history = { rawText: 'history lines', drafts: [nullableDraft({ id: 'history-draft' })] }
+    const intake = { rawText: 'intake paste', drafts: [nullableDraft({ id: 'intake-draft' })] }
+    expect(saveImportWorkspace(OWNER, history, 1_000, HISTORY_IMPORT_RECOVERY_STORAGE_PREFIX)).toBe(true)
+    expect(saveImportWorkspace(OWNER, intake, 1_000)).toBe(true)
+    expect(getImportRecoveryStorageKey(OWNER, HISTORY_IMPORT_RECOVERY_STORAGE_PREFIX)).toBe(`gelly-history-import:${OWNER}`)
+    expect(loadImportWorkspace(OWNER, 1_000, HISTORY_IMPORT_RECOVERY_STORAGE_PREFIX)?.drafts[0].id).toBe('history-draft')
+    expect(loadImportWorkspace(OWNER, 1_000)?.drafts[0].id).toBe('intake-draft')
+    clearImportWorkspace(OWNER, HISTORY_IMPORT_RECOVERY_STORAGE_PREFIX)
+    expect(loadImportWorkspace(OWNER, 1_000, HISTORY_IMPORT_RECOVERY_STORAGE_PREFIX)).toBeNull()
+    expect(loadImportWorkspace(OWNER, 1_000)?.drafts[0].id).toBe('intake-draft')
+  })
+
+  it('clearAllImportWorkspaces also wipes history import snapshots on sign-out', () => {
+    expect(saveImportWorkspace(OWNER, { rawText: 'h', drafts: [nullableDraft()] }, undefined, HISTORY_IMPORT_RECOVERY_STORAGE_PREFIX)).toBe(true)
+    clearAllImportWorkspaces()
+    expect(localStorage.getItem(getImportRecoveryStorageKey(OWNER, HISTORY_IMPORT_RECOVERY_STORAGE_PREFIX))).toBeNull()
   })
 
   it('clearAllImportWorkspaces does not throw when storage is blocked', () => {

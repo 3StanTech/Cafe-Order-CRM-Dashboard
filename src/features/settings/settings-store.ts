@@ -8,6 +8,7 @@ import {
   type RuntimeCatalogSettings,
 } from '../../domain/catalog'
 import type { MoneyCentavos, Powder, ProductSlug } from '../../domain/contracts'
+import { manilaToday } from '../../domain/delivery-schedule'
 import type { JsonValue, StorageAdapter } from '../../data/types'
 
 export const ORDER_DASHBOARD_SETTINGS_KEY = 'order_dashboard_settings'
@@ -16,6 +17,8 @@ export type OpenDay = 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday'
 
 export type DashboardSettings = RuntimeCatalogSettings & {
   openDays: OpenDay[]
+  /** Specific Manila dates (YYYY-MM-DD) that are closed even on an open weekday. */
+  closedDates: string[]
   orderCutoff: string
   deliveryWindowStart: string
   deliveryWindowEnd: string
@@ -36,6 +39,7 @@ export const DEFAULT_DASHBOARD_SETTINGS: DashboardSettings = {
   powderUpcharges: { ...POWDER_UPCHARGES },
   thermalBagPrices: { ...THERMAL_BAG_PRICES },
   openDays: ['tuesday', 'wednesday', 'thursday', 'friday', 'sunday'],
+  closedDates: [],
   orderCutoff: '20:00',
   deliveryWindowStart: '08:00',
   deliveryWindowEnd: '09:00',
@@ -86,6 +90,19 @@ function thermalBags(value: unknown): Record<1 | 2 | 3 | 4, MoneyCentavos> {
   return { 1: centavos(source['1'], THERMAL_BAG_PRICES[1]), 2: centavos(source['2'], THERMAL_BAG_PRICES[2]), 3: centavos(source['3'], THERMAL_BAG_PRICES[3]), 4: centavos(source['4'], THERMAL_BAG_PRICES[4]) }
 }
 
+export const MAX_CLOSED_DATES = 60
+
+function isIsoDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const parsed = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value
+}
+
+function closedDates(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value.filter(isIsoDate))].sort().slice(0, MAX_CLOSED_DATES)
+}
+
 export function parseDashboardSettings(value: unknown): DashboardSettings {
   const source = isRecord(value) ? value : {}
   const configuredDays = Array.isArray(source.openDays) ? source.openDays.filter((day): day is OpenDay => typeof day === 'string' && openDays.includes(day as OpenDay)) : DEFAULT_DASHBOARD_SETTINGS.openDays
@@ -97,6 +114,7 @@ export function parseDashboardSettings(value: unknown): DashboardSettings {
     powderUpcharges: powders(source.powderUpcharges),
     thermalBagPrices: thermalBags(source.thermalBagPrices),
     openDays: [...new Set(configuredDays)],
+    closedDates: closedDates(source.closedDates),
     orderCutoff: time(source.orderCutoff, DEFAULT_DASHBOARD_SETTINGS.orderCutoff),
     deliveryWindowStart: time(source.deliveryWindowStart, DEFAULT_DASHBOARD_SETTINGS.deliveryWindowStart),
     deliveryWindowEnd: time(source.deliveryWindowEnd, DEFAULT_DASHBOARD_SETTINGS.deliveryWindowEnd),
@@ -119,7 +137,10 @@ export async function loadDashboardSettings(adapter: StorageAdapter): Promise<Da
 }
 
 export async function saveDashboardSettings(adapter: StorageAdapter, settings: DashboardSettings): Promise<DashboardSettings> {
-  const clean = parseDashboardSettings(settings)
+  const parsed = parseDashboardSettings(settings)
+  const today = manilaToday(new Date())
+  // Past closures can never affect a delivery again; dropping them keeps the list short.
+  const clean = { ...parsed, closedDates: parsed.closedDates.filter((date) => date >= today) }
   const now = new Date().toISOString()
   await adapter.setSetting({
     key: ORDER_DASHBOARD_SETTINGS_KEY,

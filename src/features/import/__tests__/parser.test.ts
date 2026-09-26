@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import { parseLocalInput, validateDraft } from '../parser'
-import { buildViberChatGptPrompt } from '../prompt'
 import { viberThreads } from '../../../../test/fixtures/import/builder/viber-threads'
 
 describe('deterministic import parsing', () => {
@@ -30,13 +29,6 @@ describe('deterministic import parsing', () => {
 
   it('keeps free text out of the local path', () => {
     expect(parseLocalInput('Mika: 1 Matcha Latte please')).toEqual({ kind: 'free-text' })
-  })
-
-  it('generates a copy-ready Viber prompt with structure and no output-money instruction', () => {
-    const prompt = buildViberChatGptPrompt()
-    expect(prompt).toContain('matcha-latte')
-    expect(prompt).toContain('JSON Lines')
-    expect(prompt).toMatch(/Never provide prices/i)
   })
 
   it('turns every documented messy Viber fixture into an editable deterministically priced draft or a visible review state', () => {

@@ -2,6 +2,7 @@ import { Clipboard, LoaderCircle } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { StoredCustomer, StoredOrder } from '../../data/types'
 import type { ProductSlug } from '../../domain/contracts'
+import { formatDeliveryDate } from '../../domain/delivery-schedule'
 import { formatPhp } from '../orders/order-display'
 import { FieldLabel, OrderEditorCard } from '../order-editor/OrderEditorCard'
 import { validateDraft } from './parser'
@@ -17,7 +18,7 @@ import {
 } from './pending-api'
 import { summarizeDraftItems } from './draft-summary'
 import type { ImportDraft, ImportItem, ImportThermalBag } from './types'
-import type { PublicOrderInput, PublicOrderReconfirmation } from '../public-order/api'
+import { getPublicOrderMenu, menuDeliveryOptions, type PublicOrderDelivery, type PublicOrderInput, type PublicOrderReconfirmation } from '../public-order/api'
 
 type PendingInboxProps = {
   customers: StoredCustomer[]
@@ -202,6 +203,15 @@ function viberRejectReply(row: PendingSubmissionRow): string {
   ].join('\n')
 }
 
+/** The submitted day stays selectable (keeping it needs no reconfirm); any other day must be offered. */
+function deliveryDayChoices(offered: readonly PublicOrderDelivery[], submitted: string, current: string | null): { value: string; label: string }[] {
+  const choices = offered.map((option) => ({ value: option.deliveryDate, label: formatDeliveryDate(option.deliveryDate) }))
+  const has = (date: string) => choices.some((choice) => choice.value === date)
+  if (!has(submitted)) choices.unshift({ value: submitted, label: `${formatDeliveryDate(submitted)} · submitted` })
+  if (current && !has(current)) choices.push({ value: current, label: `${formatDeliveryDate(current)} · not offered` })
+  return choices
+}
+
 function formatSignedPhp(centavos: number): string {
   if (centavos === 0) return formatPhp(0)
   const formatted = formatPhp(Math.abs(centavos))
@@ -221,6 +231,9 @@ export function PendingInbox({ customers, orders, onCountChange }: PendingInboxP
   const [accepting, setAccepting] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<Record<string, string>>({})
+  // Days customers can currently pick; a changed date must be one of them.
+  const [offeredDates, setOfferedDates] = useState<PublicOrderDelivery[] | null>(null)
+  const [offeredDatesFailed, setOfferedDatesFailed] = useState(false)
   const expandedIdRef = useRef<string | null>(null)
   expandedIdRef.current = expandedId
   const onCountChangeRef = useRef(onCountChange)
@@ -288,7 +301,14 @@ export function PendingInbox({ customers, orders, onCountChange }: PendingInboxP
     })
   }
 
+  const loadOfferedDates = () => {
+    getPublicOrderMenu()
+      .then((menu) => { setOfferedDates(menuDeliveryOptions(menu)); setOfferedDatesFailed(false) })
+      .catch(() => setOfferedDatesFailed(true))
+  }
+
   const openEditor = (row: PendingSubmissionRow) => {
+    loadOfferedDates()
     const draft = drafts[row.id] ?? submissionToImportDraft(row)
     setExpandedId(row.id)
     setDrafts((current) => current[row.id] ? current : { ...current, [row.id]: draft })
@@ -327,6 +347,10 @@ export function PendingInbox({ customers, orders, onCountChange }: PendingInboxP
     const quoteRevision = quote?.quoteRevision ?? base.quoteRevision
     const dateChanged = Boolean(draft.deliveryDate && draft.deliveryDate !== base.originalDeliveryDate)
     const deliveryDate = quote?.deliveryDate ?? (dateChanged ? draft.deliveryDate! : base.originalDeliveryDate)
+    if (dateChanged && offeredDates && !offeredDates.some((option) => option.deliveryDate === deliveryDate)) {
+      setItemErrors((current) => ({ ...current, [row.id]: 'Choose one of the offered delivery days, or keep the submitted date.' }))
+      return
+    }
     const input = draftToPublicOrderInput(draft, {
       quoteRevision,
       quotedTotalCentavos,
@@ -369,6 +393,7 @@ export function PendingInbox({ customers, orders, onCountChange }: PendingInboxP
     } catch (error) {
       const reconfirm = getPendingReconfirmation(error)
       if (reconfirm) {
+        setOfferedDates(reconfirm.deliveryOptions)
         setReconfirmById((current) => ({ ...current, [row.id]: reconfirm }))
         return
       }
@@ -384,7 +409,10 @@ export function PendingInbox({ customers, orders, onCountChange }: PendingInboxP
     if (!reconfirm || !base) return
     const draft = drafts[row.id] ?? base.draft
     const dateChanged = Boolean(draft.deliveryDate && draft.deliveryDate !== base.originalDeliveryDate)
-    const deliveryDate = dateChanged ? reconfirm.delivery.deliveryDate : base.originalDeliveryDate
+    // Keep the owner's new day while it is still offered; otherwise move to the first offered day.
+    const deliveryDate = dateChanged
+      ? (reconfirm.deliveryOptions.find((option) => option.deliveryDate === draft.deliveryDate) ?? reconfirm.delivery).deliveryDate
+      : base.originalDeliveryDate
     setEditorBases((current) => {
       const existing = current[row.id]
       if (!existing) return current
@@ -397,8 +425,8 @@ export function PendingInbox({ customers, orders, onCountChange }: PendingInboxP
         },
       }
     })
-    if (dateChanged && draft.deliveryDate !== reconfirm.delivery.deliveryDate) {
-      setDraft({ ...draft, deliveryDate: reconfirm.delivery.deliveryDate })
+    if (dateChanged && draft.deliveryDate !== deliveryDate) {
+      setDraft({ ...draft, deliveryDate })
     }
     setReconfirmById((current) => {
       const next = { ...current }
@@ -617,6 +645,25 @@ export function PendingInbox({ customers, orders, onCountChange }: PendingInboxP
               )}
               {expanded && (
                 <div className="mt-3">
+                  <div className="mb-3">
+                    {offeredDates ? (
+                      <FieldLabel>
+                        Offered delivery day
+                        <select
+                          aria-label="Offered delivery day"
+                          className="mt-1 min-h-11 w-full rounded-xl border border-[#4F74C8]/25 bg-white px-3 text-sm normal-case tracking-normal text-[#20242f] outline-none transition-colors focus:border-[#4F74C8] focus:ring-2 focus:ring-[#4F74C8]/20"
+                          value={draft.deliveryDate ?? ''}
+                          onChange={(event) => setDraft({ ...draft, deliveryDate: event.target.value || null })}
+                        >
+                          {deliveryDayChoices(offeredDates, editorBases[row.id]?.originalDeliveryDate ?? row.delivery_date, draft.deliveryDate).map((choice) => (
+                            <option key={choice.value} value={choice.value}>{choice.label}</option>
+                          ))}
+                        </select>
+                      </FieldLabel>
+                    ) : (
+                      <p className="text-sm text-[#4A5365]">{offeredDatesFailed ? 'Offered delivery days could not be loaded. The date is still checked when you save.' : 'Loading offered delivery days…'}</p>
+                    )}
+                  </div>
                   <OrderEditorCard
                     draft={draft}
                     customers={customers}
@@ -624,6 +671,7 @@ export function PendingInbox({ customers, orders, onCountChange }: PendingInboxP
                     confirming={busyId === row.id}
                     onChange={setDraft}
                     onConfirm={() => void saveEdit(row)}
+                    hideDeliveryDate={Boolean(offeredDates)}
                   />
                 </div>
               )}

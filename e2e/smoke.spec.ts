@@ -146,7 +146,7 @@ if (process.env.VITEST) {
         { link: 'Orders', heading: 'Orders' },
         { link: 'Customers', heading: 'Customers' },
         { link: 'Insights', heading: 'Insights' },
-        { link: 'Import', heading: 'Import' },
+        { link: 'Inbox', heading: 'Inbox' },
         { link: 'Settings', heading: 'Settings' },
       ]
 

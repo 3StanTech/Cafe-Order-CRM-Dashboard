@@ -18,20 +18,26 @@ export type PreparedImportConfirmation = {
 export type ConfirmImportOptions = {
   /** Called synchronously after the key/hash are prepared and before the RPC. */
   onPrepared?: (draft: ImportDraft) => void
+  /** Prefix for a newly minted confirmation key; defaults to `viber`. */
+  keyPrefix?: string
 }
+
+const CONFIRMATION_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,100}$/
 
 function now(): string { return new Date().toISOString() }
 
-function confirmationKey(): string {
+function confirmationKey(prefix: string): string {
   // Keep this within the server-side key grammar while making it recognizable
   // in a browser's local storage during an uncertain retry.
-  return `viber-${crypto.randomUUID()}`
+  const key = `${prefix}-${crypto.randomUUID()}`
+  if (!CONFIRMATION_KEY_PATTERN.test(key)) throw new Error('The confirmation key prefix is not allowed.')
+  return key
 }
 
-export function ensureConfirmationKey(draft: ImportDraft): string {
-  return draft.confirmationKey && /^[A-Za-z0-9._:-]{16,100}$/.test(draft.confirmationKey)
+export function ensureConfirmationKey(draft: ImportDraft, prefix = 'viber'): string {
+  return draft.confirmationKey && CONFIRMATION_KEY_PATTERN.test(draft.confirmationKey)
     ? draft.confirmationKey
-    : confirmationKey()
+    : confirmationKey(prefix)
 }
 
 /** Logical draft identity intentionally excludes runtime catalog prices. */
@@ -116,7 +122,7 @@ function invalidDraftMessage(draft: ImportDraft): string {
  * Builds the exact aggregate payload once, re-pricing every item from the
  * runtime catalog. It performs no customer or order writes.
  */
-export async function prepareImportConfirmation(adapter: StorageAdapter, draft: ImportDraft): Promise<PreparedImportConfirmation> {
+export async function prepareImportConfirmation(adapter: StorageAdapter, draft: ImportDraft, keyPrefix?: string): Promise<PreparedImportConfirmation> {
   if (draft.confirmationSnapshot) {
     if (draft.confirmationSnapshot.draftIdentity !== importDraftIdentity(draft)) {
       throw new Error('This draft changed after a confirmation attempt. Restore the original fields before retrying so the durable key can resolve the earlier attempt.')
@@ -182,7 +188,7 @@ export async function prepareImportConfirmation(adapter: StorageAdapter, draft: 
   const inputWithoutHash: Omit<OrderConfirmationInput, 'requestHash'> = {
     order,
     customer,
-    confirmationKey: ensureConfirmationKey(draft),
+    confirmationKey: ensureConfirmationKey(draft, keyPrefix),
   }
   const input = { ...inputWithoutHash, requestHash: '' }
   input.requestHash = await requestHash(input)
@@ -214,7 +220,7 @@ export async function confirmImportDraft(
   draft: ImportDraft,
   options: ConfirmImportOptions = {},
 ): Promise<StoredOrder> {
-  const prepared = await prepareImportConfirmation(adapter, draft)
+  const prepared = await prepareImportConfirmation(adapter, draft, options.keyPrefix)
   options.onPrepared?.(prepared.draft)
   if (!adapter.confirmOrderWithResolution) {
     throw new Error('Durable order confirmation is not available. Apply the pending confirmation migration before importing Viber orders.')

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { StorageAdapter, StoredOrder } from '../../data/types'
-import { canAdvance, canCancel, nextStatus } from './orderLifecycle'
+import { advancePatch, canAdvance, canCancel } from './orderLifecycle'
 
 export function useOrderActions(adapter: StorageAdapter | null) {
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null)
@@ -17,9 +17,9 @@ export function useOrderActions(adapter: StorageAdapter | null) {
 
   const advance = async (order: StoredOrder) => {
     if (!adapter || !canAdvance(order)) return
-    const next = nextStatus(order.status)
-    if (!next) return
-    await update(order, { status: next, ...(next === 'paid' ? { paymentReceived: true } : {}) })
+    const patch = advancePatch(order.status)
+    if (!patch) return
+    await update(order, patch)
   }
 
   const cancel = async (order: StoredOrder) => {

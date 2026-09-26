@@ -44,6 +44,22 @@ describe('lifecycleTimestampLines', () => {
     ])
   })
 
+  it('returns a single Imported line for a history-imported order instead of its import-day timestamps', () => {
+    expect(lifecycleTimestampLines({
+      paidAt: '2026-09-26T08:00:00.000Z',
+      deliveredAt: '2026-09-26T08:00:01.000Z',
+      rawSource: 'history-import:viber-2026-03-01-mika',
+    })).toEqual(['Imported'])
+  })
+
+  it('keeps Paid and Delivered lines for an order whose raw source only mentions history', () => {
+    expect(lifecycleTimestampLines({
+      paidAt: '2026-07-16T08:00:00.000Z',
+      deliveredAt: null,
+      rawSource: 'viber paste about history-import:',
+    })).toEqual(['Paid Jul 16, 4:00 PM'])
+  })
+
   it('returns only a Delivered line if paidAt is somehow absent (defensive)', () => {
     expect(lifecycleTimestampLines({
       paidAt: null,

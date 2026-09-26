@@ -4,7 +4,8 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import type { StorageAdapter, StoredCustomer, StoredOrder } from '../../data/types'
 import { OrderEditorModal } from '../order-editor/OrderEditorModal'
 import { storedOrderToImportDraft } from '../order-editor/orderDraftMapping'
-import { relevantDeliveryDate } from '../today/delivery-dates'
+import { getRelevantDeliveryDate } from '../../domain/delivery-schedule'
+import { useDashboardSettings } from '../settings/useDashboardSettings'
 import { formatCupNames } from '../import/cup-names'
 import { formatPhp } from '../orders/order-display'
 import { lifecycleTimestampLines } from '../orders/order-timestamps'
@@ -95,6 +96,7 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
   const [deleting, setDeleting] = useState(false)
 
   const [repeatOrderOpen, setRepeatOrderOpen] = useState(false)
+  const { settings } = useDashboardSettings(adapter)
 
   const customerOrders = useMemo(
     () => orders.filter((order) => order.customerId === summary.customer.id).sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
@@ -268,7 +270,7 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
           customers={customers}
           orders={orders}
           editingOrder={null}
-          initialDraft={{ ...storedOrderToImportDraft(summary.lastOrder, summary.customer.name), deliveryDate: relevantDeliveryDate(), rawSource: `Repeat of order ${summary.lastOrder.id}` }}
+          initialDraft={{ ...storedOrderToImportDraft(summary.lastOrder, summary.customer.name), deliveryDate: getRelevantDeliveryDate(new Date(), settings), rawSource: `Repeat of order ${summary.lastOrder.id}` }}
           title="Repeat last order"
           onClose={() => setRepeatOrderOpen(false)}
           onSaved={() => setRepeatOrderOpen(false)}

@@ -6,6 +6,8 @@ import { demoOrders } from '../../demo/seed'
 import { formatLifecycleTimestamp } from '../orders/order-timestamps'
 import { canAdvance, canCancel, nextStatus } from '../orders/orderLifecycle'
 import { TodayBoard } from './TodayBoard'
+import { manilaToday } from '../../domain/delivery-schedule'
+import { DEFAULT_DASHBOARD_SETTINGS, saveDashboardSettings } from '../settings/settings-store'
 
 const deliveryDate = '2026-07-16'
 let adapters: LocalAdapter[] = []
@@ -26,6 +28,24 @@ async function createAdapter(): Promise<LocalAdapter> {
 }
 
 describe('TodayBoard', () => {
+  it('defaults to the run from saved Settings, skipping an owner-closed today', async () => {
+    const adapter = await createAdapter()
+    const today = manilaToday(new Date())
+    const tomorrow = new Date(`${today}T00:00:00.000Z`)
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1)
+    await saveDashboardSettings(adapter, {
+      ...DEFAULT_DASHBOARD_SETTINGS,
+      openDays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'],
+      closedDates: [today],
+      deliveryWindowStart: '07:30',
+      orderCutoff: '21:00',
+    })
+    render(<TodayBoard adapter={adapter} />)
+
+    await waitFor(() => expect(screen.getByLabelText('Delivery date')).toHaveValue(tomorrow.toISOString().slice(0, 10)))
+    expect(screen.getByText(/7:30 AM–9 AM delivery run · orders close at 9 PM/)).toBeInTheDocument()
+  })
+
   it('scopes orders by the selected delivery date', async () => {
     const adapter = await createAdapter()
     await adapter.updateOrder(demoOrders[1].id, { deliveryDate: '2026-07-17' })
